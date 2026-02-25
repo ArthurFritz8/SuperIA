@@ -69,6 +69,15 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan) ->
             console.print("Agente> Tive um erro executando o plano.")
             return
 
+        # Observabilidade do MVP:
+        # - Em agentes, tool output é parte essencial do feedback loop.
+        # - Truncamos para não poluir o terminal nem expor dados demais por acidente.
+        if result.status == "ok" and result.output:
+            out = result.output.strip()
+            if len(out) > 2000:
+                out = out[:2000] + "\n... [truncado]"
+            console.print(Panel(out, title=f"Tool: {call.tool_name}"))
+
     if plan.final_response:
         console.print(f"Agente> {plan.final_response}")
     else:
