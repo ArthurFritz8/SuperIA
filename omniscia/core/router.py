@@ -423,6 +423,11 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
             data = json.loads(raw[start : end + 1])
 
         return Plan.model_validate(data)
-    except Exception:  # noqa: BLE001
-        logger.exception("Falha ao rotear via LLM; caindo no heurístico")
+    except Exception as e:  # noqa: BLE001
+        from omniscia.core.redact import redact_secrets
+
+        logger.error(
+            "Falha ao rotear via LLM; caindo no heurístico (%s)",
+            redact_secrets(str(e)),
+        )
         return None

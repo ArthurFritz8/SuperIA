@@ -168,6 +168,8 @@ def _ask_llm_for_fixed_file(
         if not fixed.strip():
             return None
         return fixed
-    except Exception:
-        logger.exception("Falha ao obter correção do LLM")
+    except Exception as e:
+        from omniscia.core.redact import redact_secrets
+
+        logger.error("Falha ao obter correção do LLM (%s)", redact_secrets(str(e)))
         return None

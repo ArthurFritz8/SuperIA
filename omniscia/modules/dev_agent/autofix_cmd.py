@@ -285,6 +285,8 @@ def _ask_llm_for_edits(
                 continue
             out.append({"path": str(e["path"]), "content": str(e.get("content", ""))})
         return out or None
-    except Exception:
-        logger.exception("Falha ao obter edits do LLM")
+    except Exception as e:
+        from omniscia.core.redact import redact_secrets
+
+        logger.error("Falha ao obter edits do LLM (%s)", redact_secrets(str(e)))
         return None
