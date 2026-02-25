@@ -68,12 +68,39 @@ def _route_heuristic(user_message: str) -> Plan:
     # Regra 1: operações potencialmente críticas
     # Ex: "apague", "delete", "rm -rf" etc.
     if re.search(r"\b(apagar|delete|deletar|rm\s+-rf|formatar)\b", lower):
+        # Heurística simples para extrair path depois de "apagar".
+        m = re.search(r"\b(apagar|delete|deletar)\s+([^\n\r]+)", lower)
+        path = ""
+        if m:
+            path = m.group(2).strip().strip('"').strip("'")
         return Plan(
             intent="filesystem.delete",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="echo", args={"text": "(stub) delete"})],
+            tool_calls=[ToolCall(tool_name="fs.delete", args={"path": path})],
             risk=RiskLevel.CRITICAL,
             final_response="Ação de apagar detectada. Preciso de confirmação (HITL).",
+        )
+
+    # Regra: listar diretório
+    if re.search(r"\b(listar|lista|ls|dir)\b", lower):
+        return Plan(
+            intent="filesystem.list",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fs.list_dir", args={"path": "."})],
+            risk=RiskLevel.LOW,
+            final_response="Listando arquivos do workspace.",
+        )
+
+    # Regra: ler arquivo
+    m = re.search(r"\b(ler|leia|cat|abrir)\b\s+([\w\-./\\]+)", lower)
+    if m and m.group(2):
+        path = m.group(2).strip().replace("\\", "/")
+        return Plan(
+            intent="filesystem.read",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fs.read_text", args={"path": path, "max_chars": 8000})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, vou ler o arquivo.",
         )
 
     # Regra 2: escrever arquivo

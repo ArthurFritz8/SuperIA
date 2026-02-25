@@ -123,6 +123,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         except Exception:
             logger.info("Memory tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools de filesystem (guardrailed)
+    try:
+        from omniscia.modules.os_control.filesystem import register_filesystem_tools
+
+        register_filesystem_tools(registry)
+    except Exception:
+        logger.info("Filesystem tools indisponíveis (erro ao importar/registrar).")
+
     # Registro opcional de ferramentas web.
     # Import lazy para evitar dependência dura de Playwright neste estágio.
     if settings is not None:
