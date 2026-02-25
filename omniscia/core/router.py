@@ -75,6 +75,35 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Fiz OCR da tela atual.",
         )
 
+    # Regra: DEV - executar comando (ex: "executar: python -c \"print(2+2)\"")
+    m = re.search(r"\b(executar|rodar)\b\s*[:]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        command = m.group(2).strip()
+
+        # Heurística de risco: comandos destrutivos viram CRITICAL.
+        cmd_norm = _normalize(command)
+        critical = bool(re.search(r"\b(rm\s+-rf|del\b|erase\b|format\b|shutdown\b|reg\b)\b", cmd_norm))
+
+        return Plan(
+            intent="dev.exec",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="dev.exec", args={"command": command, "timeout_s": 120})],
+            risk=RiskLevel.CRITICAL if critical else RiskLevel.HIGH,
+            final_response="Vou executar o comando no sandbox.",
+        )
+
+    # Regra: DEV - python rápido (ex: "python: print(2+2)")
+    m = re.search(r"\bpython\b\s*[:]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        code = m.group(1).strip()
+        return Plan(
+            intent="dev.run_python",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="dev.run_python", args={"code": code, "timeout_s": 60})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok, vou executar esse Python.",
+        )
+
     # Regra: GUI - mover mouse (ex: "mover mouse 100 200")
     m = re.search(r"\b(mover mouse|move mouse)\b\s+(\d+)\s+(\d+)", norm)
     if m:

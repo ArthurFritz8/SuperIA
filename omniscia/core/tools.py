@@ -131,6 +131,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("Filesystem tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools do DevAgent (execução de código/comandos)
+    try:
+        from omniscia.modules.dev_agent.tooling import register_dev_tools
+
+        register_dev_tools(registry)
+    except Exception:
+        logger.info("DevAgent tools indisponíveis (erro ao importar/registrar).")
+
     # Tools de GUI (mouse/teclado)
     try:
         from omniscia.modules.os_control.gui import register_gui_tools
