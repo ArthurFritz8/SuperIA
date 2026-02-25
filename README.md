@@ -189,3 +189,13 @@ Comandos heurísticos úteis no MVP:
 - `clicar 100 200` (CRITICAL → pede YES)
 - `digitar: hello` (CRITICAL → pede YES)
 - `screenshot`
+
+## OCR (opcional)
+
+Para ler texto da tela localmente (sem enviar imagem para a internet):
+
+- `pip install pytesseract`
+- Instale o Tesseract no Windows e (se necessário) configure `OMNI_TESSERACT_CMD`.
+
+Comando heurístico:
+- `ocr` (ou "ler tela")

@@ -46,6 +46,10 @@ class Settings:
     # Web (Playwright)
     web_headless: bool = True
 
+    # OCR (Tesseract)
+    # No Windows, às vezes o tesseract.exe não está no PATH.
+    tesseract_cmd: str | None = None
+
     # Logs
     log_level: str = "INFO"
 
@@ -67,6 +71,8 @@ class Settings:
         hitl_enabled = (os.getenv("OMNI_HITL_ENABLED", "true").strip().lower() != "false")
 
         web_headless = (os.getenv("OMNI_WEB_HEADLESS", "true").strip().lower() != "false")
+
+        tesseract_cmd = os.getenv("OMNI_TESSERACT_CMD") or None
 
         llm_provider = os.getenv("OMNI_LLM_PROVIDER") or None
         llm_model = os.getenv("OMNI_LLM_MODEL") or None
@@ -120,5 +126,6 @@ class Settings:
             stt_sample_rate=stt_sample_rate,
             hitl_enabled=hitl_enabled,
             web_headless=web_headless,
+            tesseract_cmd=tesseract_cmd,
             log_level=log_level,
         )

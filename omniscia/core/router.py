@@ -65,6 +65,16 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Tirei uma captura de tela.",
         )
 
+    # Regra: OCR
+    if re.search(r"\b(ocr|ler tela|leia a tela|o que esta escrito|o que esta na tela)\b", norm):
+        return Plan(
+            intent="vision.ocr",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="screen.ocr", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Fiz OCR da tela atual.",
+        )
+
     # Regra: GUI - mover mouse (ex: "mover mouse 100 200")
     m = re.search(r"\b(mover mouse|move mouse)\b\s+(\d+)\s+(\d+)", norm)
     if m:

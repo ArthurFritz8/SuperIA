@@ -147,6 +147,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("Vision tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools de OCR
+    if settings is not None:
+        try:
+            from omniscia.modules.vision.ocr import register_ocr_tools
+
+            register_ocr_tools(registry, settings)
+        except Exception:
+            logger.info("OCR tools indisponíveis (erro ao importar/registrar).")
+
     # Registro opcional de ferramentas web.
     # Import lazy para evitar dependência dura de Playwright neste estágio.
     if settings is not None:
