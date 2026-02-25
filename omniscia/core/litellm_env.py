@@ -12,6 +12,27 @@ from __future__ import annotations
 from omniscia.core.config import Settings
 
 
+def provider_requires_api_key(provider: str | None) -> bool:
+    """Return True if this provider should require an API key.
+
+    Default is conservative (True) for unknown providers.
+    """
+
+    p = (provider or "").strip().lower().rstrip("/")
+    if not p:
+        return True
+
+    # Local / no-auth providers
+    if p in {"ollama"}:
+        return False
+
+    # Known cloud providers
+    if p in {"gemini", "google_ai_studio", "google-ai-studio", "google", "openai", "anthropic"}:
+        return True
+
+    return True
+
+
 def apply_litellm_env(settings: Settings) -> None:
     """Aplica variáveis de ambiente esperadas pelo LiteLLM.
 

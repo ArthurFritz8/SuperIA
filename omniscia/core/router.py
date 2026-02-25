@@ -340,7 +340,11 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
     - Se config estiver ausente, retornamos None e caímos no heurístico.
     """
 
-    if not (settings.llm_provider and settings.llm_model and settings.llm_api_key):
+    from omniscia.core.litellm_env import provider_requires_api_key
+
+    needs_key = provider_requires_api_key(settings.llm_provider)
+    has_key = bool((settings.llm_api_key or "").strip())
+    if not (settings.llm_provider and settings.llm_model and (has_key or not needs_key)):
         logger.warning("Router LLM habilitado, mas falta OMNI_LLM_*; caindo no heurístico")
         return None
 
@@ -391,7 +395,11 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
     llm_provider = settings.llm_provider
     llm_model = settings.llm_model
     llm_api_key = settings.llm_api_key
-    if not (llm_provider and llm_model and llm_api_key):
+    from omniscia.core.litellm_env import provider_requires_api_key
+
+    needs_key = provider_requires_api_key(llm_provider)
+    has_key = bool((llm_api_key or "").strip())
+    if not (llm_provider and llm_model and (has_key or not needs_key)):
         return None
 
     # Não logamos a key; só configuramos no ambiente do litellm.

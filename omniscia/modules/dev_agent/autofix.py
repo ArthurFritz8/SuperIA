@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from omniscia.core.config import Settings
+from omniscia.core.litellm_env import provider_requires_api_key
 from omniscia.modules.dev_agent.sandbox import python_argv, run_command
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,9 @@ def autofix_python_file(
     if not target.exists() or not target.is_file():
         return AutoFixResult(status="failed", iters=0, summary="arquivo não existe")
 
-    if not (settings.llm_provider and settings.llm_model and settings.llm_api_key):
+    needs_key = provider_requires_api_key(settings.llm_provider)
+    has_key = bool((settings.llm_api_key or "").strip())
+    if not (settings.llm_provider and settings.llm_model and (has_key or not needs_key)):
         return AutoFixResult(
             status="needs_llm",
             iters=0,
@@ -143,7 +146,9 @@ def _ask_llm_for_fixed_file(
         f"{stderr}\n"
     )
 
-    if not (settings.llm_provider and settings.llm_model and settings.llm_api_key):
+    needs_key = provider_requires_api_key(settings.llm_provider)
+    has_key = bool((settings.llm_api_key or "").strip())
+    if not (settings.llm_provider and settings.llm_model and (has_key or not needs_key)):
         return None
 
     llm_model: str = settings.llm_model
