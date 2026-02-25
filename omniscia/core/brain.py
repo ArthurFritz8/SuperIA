@@ -277,6 +277,14 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
                 except Exception:
                     pass
 
+    if tool_name == "gui.type_text" and "text" in a:
+        before = a.get("text")
+        after = norm_str(before)
+        if before != after:
+            a["text"] = after
+            did = True
+            note_parts.append("text trimmed")
+
     if tool_name == "dev.exec" and "command" in a:
         before = a.get("command")
         after = norm_str(before)
@@ -284,6 +292,15 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
             a["command"] = after
             did = True
             note_parts.append("command trimmed")
+
+    if tool_name in {"dev.exec", "dev.run_python", "dev.autofix_python_file", "dev.autofix_cmd"}:
+        if "timeout_s" in a:
+            try:
+                a["timeout_s"] = float(str(a.get("timeout_s")))
+                did = True
+                note_parts.append("timeout_s float")
+            except Exception:
+                pass
 
     if tool_name in {"dev.autofix_python_file"} and "path" in a:
         before = a.get("path")
@@ -449,6 +466,27 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
         if len(command) > 5000:
             return "command muito longo"
 
+        # Validação extra: executável allowlisted (defesa em profundidade).
+        try:
+            from omniscia.modules.dev_agent.sandbox import is_allowlisted, parse_command
+
+            argv = parse_command(command)
+            if not argv:
+                return "command vazio"
+            if not is_allowlisted(argv):
+                return f"executável não allowlisted: {argv[0]}"
+        except Exception:
+            # Se falhar ao importar/parsing, não liberamos nada extra aqui.
+            pass
+
+        if "timeout_s" in a:
+            try:
+                t = float(str(a.get("timeout_s")))
+            except Exception:
+                return "timeout_s inválido"
+            if t <= 0 or t > 300:
+                return "timeout_s fora do limite (0 < timeout_s <= 300)"
+
     if tool_name == "dev.run_python":
         # Pelo menos um entre code/module/script.
         if not any(k in a and str(a.get(k, "")).strip() for k in ("code", "module", "script")):
@@ -458,6 +496,14 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
             if not _is_safe_rel_path(script):
                 return "script inválido (use path relativo)"
 
+        if "timeout_s" in a:
+            try:
+                t = float(str(a.get("timeout_s")))
+            except Exception:
+                return "timeout_s inválido"
+            if t <= 0 or t > 300:
+                return "timeout_s fora do limite (0 < timeout_s <= 300)"
+
     # GUI args básicos
     if tool_name in {"gui.move_mouse", "gui.click"}:
         for k in ("x", "y"):
@@ -465,13 +511,25 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
                 return f"faltando {k}"
             try:
                 val = a.get(k, "")
-                int(str(val))
+                n = int(str(val))
             except Exception:
                 return f"{k} deve ser int"
+
+            if n < 0 or n > 20000:
+                return f"{k} fora do limite (0..20000)"
 
     if tool_name == "gui.type_text":
         if "text" not in a:
             return "faltando text"
+        text = a.get("text")
+        if not isinstance(text, str):
+            return "text deve ser string"
+        if not text.strip():
+            return "text vazio"
+        if len(text) > 2000:
+            return "text muito longo (max 2000 chars)"
+        if "\x00" in text:
+            return "text contém caractere inválido"
 
     # Qualquer outra tool: sem validação extra aqui.
     return None
