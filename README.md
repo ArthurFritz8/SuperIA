@@ -154,6 +154,7 @@ O MVP roda em **modo texto**, usando LLM opcional. Se `OMNI_LLM_PROVIDER` não e
 
 Comando útil dentro do agente:
 - `settings` (ou `status`) para ver as configurações efetivas (segredos redigidos)
+- `tools` (ou `ajuda`) para listar as tools disponíveis (com risk)
 
 ## Voz (STT Whisper API) — opcional
 

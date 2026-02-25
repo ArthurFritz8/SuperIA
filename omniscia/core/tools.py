@@ -140,6 +140,13 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
 
         return ToolResult(status="ok", output="\n".join(lines))
 
+    def tool_list_tools(args: dict[str, Any]) -> ToolResult:
+        specs = sorted(registry.list(), key=lambda s: s.name)
+        lines = ["== Tools registradas =="]
+        for spec in specs:
+            lines.append(f"- {spec.name} (risk={spec.risk}): {spec.description}")
+        return ToolResult(status="ok", output="\n".join(lines))
+
     registry.register(
         ToolSpec(
             name="echo",
@@ -164,6 +171,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             description="Mostra settings efetivas (segredos redigidos)",
             risk="LOW",
             fn=tool_show_settings,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="core.list_tools",
+            description="Lista tools registradas (com risco e descrição)",
+            risk="LOW",
+            fn=tool_list_tools,
         )
     )
 

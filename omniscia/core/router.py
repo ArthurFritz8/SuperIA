@@ -242,6 +242,16 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Aqui estão as configurações efetivas.",
         )
 
+    # Regra: ajuda/tools
+    if norm in {"tools", "tool", "ajuda", "help", "comandos", "commands"}:
+        return Plan(
+            intent="core.list_tools",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.list_tools", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Aqui está a lista de tools disponíveis.",
+        )
+
     # Regra 0: saída
     if norm in {"sair", "exit", "quit"}:
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
@@ -351,6 +361,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
         "- core.show_settings -> {}\n"
+        "- core.list_tools -> {}\n"
         "- echo -> {text}\n"
         "- write_file -> {path, content}\n"
         "- memory.search -> {query, limit}\n"
