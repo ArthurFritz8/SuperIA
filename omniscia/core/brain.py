@@ -86,7 +86,12 @@ def run_brain_loop(settings: Settings) -> None:
 def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
     console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
 
-    if not require_approval(plan, enabled=settings.hitl_enabled):
+    if not require_approval(
+        plan,
+        enabled=settings.hitl_enabled,
+        min_risk=settings.hitl_min_risk,
+        require_token=settings.hitl_require_token,
+    ):
         console.print("Agente> Ok, não vou executar isso.")
         return
 

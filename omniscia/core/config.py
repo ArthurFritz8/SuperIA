@@ -14,6 +14,8 @@ from typing import Literal
 
 from dotenv import load_dotenv
 
+from omniscia.core.types import RiskLevel
+
 
 RouterMode = Literal["heuristic", "llm"]
 SttMode = Literal["text", "whisper_openai"]
@@ -42,6 +44,8 @@ class Settings:
 
     # Segurança
     hitl_enabled: bool = True
+    hitl_min_risk: RiskLevel = RiskLevel.CRITICAL
+    hitl_require_token: bool = False
 
     # Web (Playwright)
     web_headless: bool = True
@@ -69,6 +73,15 @@ class Settings:
         stt_mode = os.getenv("OMNI_STT_MODE", "text").strip() or "text"
         tts_mode = os.getenv("OMNI_TTS_MODE", "none").strip() or "none"
         hitl_enabled = (os.getenv("OMNI_HITL_ENABLED", "true").strip().lower() != "false")
+        hitl_require_token = (
+            os.getenv("OMNI_HITL_REQUIRE_TOKEN", "false").strip().lower() == "true"
+        )
+
+        hitl_min_risk_raw = (os.getenv("OMNI_HITL_MIN_RISK", "CRITICAL") or "CRITICAL").strip().upper()
+        try:
+            hitl_min_risk = RiskLevel(hitl_min_risk_raw)
+        except Exception:
+            hitl_min_risk = RiskLevel.CRITICAL
 
         web_headless = (os.getenv("OMNI_WEB_HEADLESS", "true").strip().lower() != "false")
 
@@ -125,6 +138,8 @@ class Settings:
             stt_record_seconds=stt_record_seconds,
             stt_sample_rate=stt_sample_rate,
             hitl_enabled=hitl_enabled,
+            hitl_min_risk=hitl_min_risk,
+            hitl_require_token=hitl_require_token,
             web_headless=web_headless,
             tesseract_cmd=tesseract_cmd,
             log_level=log_level,

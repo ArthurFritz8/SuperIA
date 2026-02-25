@@ -28,8 +28,8 @@ class SttProvider(ABC):
 
     return False
 
-    @abstractmethod
-    def listen(self) -> str:
-        """Bloqueia até obter um comando do usuário (string)."""
+  @abstractmethod
+  def listen(self) -> str:
+    """Bloqueia até obter um comando do usuário (string)."""
 
-        raise NotImplementedError
+    raise NotImplementedError
