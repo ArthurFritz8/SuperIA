@@ -152,6 +152,9 @@ SuperIA/
 
 O MVP roda em **modo texto**, usando LLM opcional. Se `OMNI_LLM_PROVIDER` não estiver configurado, ele usa um roteador heurístico simples.
 
+Comando útil dentro do agente:
+- `settings` (ou `status`) para ver as configurações efetivas (segredos redigidos)
+
 ## Voz (STT Whisper API) — opcional
 
 1) Instale dependências de captura de microfone (opcional):

@@ -232,6 +232,16 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, vou abrir a página e extrair o texto (read-only).",
         )
 
+    # Regra: status/config/settings
+    if norm in {"settings", "config", "configuracao", "configuracoes", "status", "seguranca"}:
+        return Plan(
+            intent="core.show_settings",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.show_settings", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Aqui estão as configurações efetivas.",
+        )
+
     # Regra 0: saída
     if norm in {"sair", "exit", "quit"}:
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
@@ -340,6 +350,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
         "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
+        "- core.show_settings -> {}\n"
         "- echo -> {text}\n"
         "- write_file -> {path, content}\n"
         "- memory.search -> {query, limit}\n"

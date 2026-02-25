@@ -96,6 +96,50 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         p.write_text(content, encoding="utf-8")
         return ToolResult(status="ok", output=f"wrote {path}")
 
+    def tool_show_settings(args: dict[str, Any]) -> ToolResult:
+        # Preferimos mostrar as settings efetivas do processo (as já carregadas no brain).
+        # Fallback: se build_default_registry foi chamado sem settings, recarrega do env.
+        effective = settings
+        if effective is None:
+            try:
+                from omniscia.core.config import Settings
+
+                effective = Settings.load()
+            except Exception as exc:  # noqa: BLE001
+                return ToolResult(status="error", error=f"falha carregando settings: {exc}")
+
+        assert effective is not None
+
+        def _is_set(v) -> bool:
+            return bool(v)
+
+        lines = [
+            "== Settings (efetivas) ==",
+            f"router_mode={effective.router_mode}",
+            f"hitl_enabled={effective.hitl_enabled}",
+            f"hitl_min_risk={effective.hitl_min_risk}",
+            f"hitl_require_token={effective.hitl_require_token}",
+            "",
+            "== LLM ==",
+            f"llm_provider={effective.llm_provider or ''}",
+            f"llm_model={effective.llm_model or ''}",
+            f"llm_api_key_set={_is_set(effective.llm_api_key)}",
+            "",
+            "== STT/TTS ==",
+            f"stt_mode={effective.stt_mode}",
+            f"stt_openai_api_key_set={_is_set(effective.stt_openai_api_key)}",
+            f"stt_openai_model={effective.stt_openai_model}",
+            f"tts_mode={effective.tts_mode}",
+            "",
+            "== Web/OCR ==",
+            f"web_headless={effective.web_headless}",
+            f"tesseract_cmd_set={_is_set(effective.tesseract_cmd)}",
+            "",
+            f"log_level={effective.log_level}",
+        ]
+
+        return ToolResult(status="ok", output="\n".join(lines))
+
     registry.register(
         ToolSpec(
             name="echo",
@@ -111,6 +155,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             description="Escreve arquivo relativo ao workspace (guardrailed)",
             risk="HIGH",
             fn=tool_write_file,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="core.show_settings",
+            description="Mostra settings efetivas (segredos redigidos)",
+            risk="LOW",
+            fn=tool_show_settings,
         )
     )
 
