@@ -27,7 +27,15 @@ def provider_requires_api_key(provider: str | None) -> bool:
         return False
 
     # Known cloud providers
-    if p in {"gemini", "google_ai_studio", "google-ai-studio", "google", "openai", "anthropic"}:
+    if p in {
+        "gemini",
+        "google_ai_studio",
+        "google-ai-studio",
+        "google",
+        "openai",
+        "anthropic",
+        "groq",
+    }:
         return True
 
     return True
@@ -64,3 +72,7 @@ def apply_litellm_env(settings: Settings) -> None:
     # Anthropic (se você usar)
     if p in {"anthropic"} and api_key:
         os.environ["ANTHROPIC_API_KEY"] = api_key
+
+    # Groq (se você usar)
+    if p in {"groq"} and api_key:
+        os.environ["GROQ_API_KEY"] = api_key

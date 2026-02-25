@@ -5,6 +5,7 @@ import re
 
 _QUERY_KEY_RE = re.compile(r"([?&]key=)([^&\s]+)", re.IGNORECASE)
 _GOOGLE_API_KEY_RE = re.compile(r"\bAIza[0-9A-Za-z\-_]{20,}\b")
+_GROQ_API_KEY_RE = re.compile(r"\bgsk_[0-9A-Za-z]{10,}\b")
 
 
 def redact_secrets(text: str) -> str:
@@ -20,4 +21,5 @@ def redact_secrets(text: str) -> str:
 
     redacted = _QUERY_KEY_RE.sub(r"\1REDACTED", text)
     redacted = _GOOGLE_API_KEY_RE.sub("REDACTED", redacted)
+    redacted = _GROQ_API_KEY_RE.sub("REDACTED", redacted)
     return redacted
