@@ -176,3 +176,16 @@ Ações marcadas como `risk=CRITICAL` exigem confirmação explícita via termin
 ---
 
 Se quiser, no próximo passo eu já adiciono: (a) STT com Whisper, (b) Playwright com um "browser tool" real, e (c) ChromaDB para memória persistente.
+
+## GUI e Screenshot (opcional)
+
+Para habilitar ferramentas de mouse/teclado e screenshot local:
+
+- `pip install pyautogui mss pillow`
+
+Comandos heurísticos úteis no MVP:
+- `posição do mouse`
+- `mover mouse 100 200`
+- `clicar 100 200` (CRITICAL → pede YES)
+- `digitar: hello` (CRITICAL → pede YES)
+- `screenshot`

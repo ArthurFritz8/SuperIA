@@ -131,6 +131,22 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("Filesystem tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools de GUI (mouse/teclado)
+    try:
+        from omniscia.modules.os_control.gui import register_gui_tools
+
+        register_gui_tools(registry)
+    except Exception:
+        logger.info("GUI tools indisponíveis (erro ao importar/registrar).")
+
+    # Tools de visão (screenshot)
+    try:
+        from omniscia.modules.vision.screenshot import register_vision_tools
+
+        register_vision_tools(registry)
+    except Exception:
+        logger.info("Vision tools indisponíveis (erro ao importar/registrar).")
+
     # Registro opcional de ferramentas web.
     # Import lazy para evitar dependência dura de Playwright neste estágio.
     if settings is not None:
