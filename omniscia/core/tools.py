@@ -133,6 +133,7 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             "",
             "== Web/OCR ==",
             f"web_headless={effective.web_headless}",
+            f"web_assume_https={effective.web_assume_https}",
             f"tesseract_cmd_set={_is_set(effective.tesseract_cmd)}",
             "",
             f"log_level={effective.log_level}",
