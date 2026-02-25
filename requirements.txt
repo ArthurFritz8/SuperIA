@@ -13,6 +13,10 @@ litellm>=1.45
 # Voz (STT offline)
 # faster-whisper>=1.0
 
+# Voz (STT microfone -> Whisper API)
+# sounddevice>=0.4
+# soundfile>=0.12
+
 # Visão
 # mss>=9.0
 # pillow>=10.3

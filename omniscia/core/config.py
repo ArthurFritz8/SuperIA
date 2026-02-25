@@ -34,6 +34,12 @@ class Settings:
     stt_mode: SttMode = "text"
     tts_mode: TtsMode = "none"
 
+    # STT (Whisper API) — opcional
+    stt_openai_api_key: str | None = None
+    stt_openai_model: str = "whisper-1"
+    stt_record_seconds: float = 6.0
+    stt_sample_rate: int = 16000
+
     # Segurança
     hitl_enabled: bool = True
 
@@ -66,6 +72,30 @@ class Settings:
         llm_model = os.getenv("OMNI_LLM_MODEL") or None
         llm_api_key = os.getenv("OMNI_LLM_API_KEY") or None
 
+        stt_openai_api_key = os.getenv("OMNI_STT_OPENAI_API_KEY") or None
+        stt_openai_model = os.getenv("OMNI_STT_OPENAI_MODEL", "whisper-1").strip() or "whisper-1"
+
+        def _float_env(name: str, default: float) -> float:
+            raw = (os.getenv(name) or "").strip()
+            if not raw:
+                return default
+            try:
+                return float(raw)
+            except ValueError:
+                return default
+
+        def _int_env(name: str, default: int) -> int:
+            raw = (os.getenv(name) or "").strip()
+            if not raw:
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                return default
+
+        stt_record_seconds = _float_env("OMNI_STT_RECORD_SECONDS", 6.0)
+        stt_sample_rate = _int_env("OMNI_STT_SAMPLE_RATE", 16000)
+
         log_level = os.getenv("OMNI_LOG_LEVEL", "INFO").strip() or "INFO"
 
         # Normalização mínima: evita valores inválidos explodirem silenciosamente.
@@ -83,6 +113,11 @@ class Settings:
             llm_api_key=llm_api_key,
             stt_mode=stt_mode,  # type: ignore[arg-type]
             tts_mode=tts_mode,  # type: ignore[arg-type]
+
+            stt_openai_api_key=stt_openai_api_key,
+            stt_openai_model=stt_openai_model,
+            stt_record_seconds=stt_record_seconds,
+            stt_sample_rate=stt_sample_rate,
             hitl_enabled=hitl_enabled,
             web_headless=web_headless,
             log_level=log_level,

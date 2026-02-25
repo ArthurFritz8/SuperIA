@@ -17,6 +17,8 @@ dependencies = [
 [project.optional-dependencies]
 voice = [
   "pyttsx3>=2.90",
+  "sounddevice>=0.4",
+  "soundfile>=0.12",
 ]
 vision = [
   "mss>=9.0",

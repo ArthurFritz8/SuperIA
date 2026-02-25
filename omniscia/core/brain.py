@@ -23,6 +23,7 @@ from omniscia.core.hitl import require_approval
 from omniscia.core.router import route
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan
+from omniscia.modules.stt.factory import build_stt
 
 logger = logging.getLogger(__name__)
 
@@ -32,15 +33,30 @@ def run_brain_loop(settings: Settings) -> None:
 
     console = Console()
     registry = build_default_registry(settings=settings)
+    stt = build_stt(settings, console=console)
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
     while True:
         try:
-            user_message = console.input("\nVocê> ").strip()
+            if stt.is_voice:
+                console.print(
+                    f"\n[dim]Gravando por ~{settings.stt_record_seconds}s... fale agora.[/dim]"
+                )
+            user_message = stt.listen().strip()
         except (EOFError, KeyboardInterrupt):
             console.print("\nEncerrando.")
             return
+        except Exception as exc:  # noqa: BLE001
+            # Se o STT falhar (microfone, deps), caímos para texto no próximo loop.
+            logger.exception("Falha no STT")
+            console.print(f"[red]Erro no STT:[/red] {exc}")
+            console.print("[yellow]Voltando para modo texto.[/yellow]")
+            settings = Settings(
+                **{**settings.__dict__, "stt_mode": "text"},  # type: ignore[arg-type]
+            )
+            stt = build_stt(settings, console=console)
+            continue
 
         if not user_message:
             continue

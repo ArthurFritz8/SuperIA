@@ -152,6 +152,23 @@ SuperIA/
 
 O MVP roda em **modo texto**, usando LLM opcional. Se `OMNI_LLM_PROVIDER` não estiver configurado, ele usa um roteador heurístico simples.
 
+## Voz (STT Whisper API) — opcional
+
+1) Instale dependências de captura de microfone (opcional):
+
+- `pip install sounddevice soundfile`
+
+2) Configure no seu `.env` (não commitar):
+
+- `OMNI_STT_MODE=whisper_openai`
+- `OMNI_STT_OPENAI_API_KEY=...`
+
+3) Rode:
+
+- `python -m omniscia.app run`
+
+Se faltar chave/deps/microfone, o sistema cai automaticamente para modo texto.
+
 ## Segurança (HITL)
 
 Ações marcadas como `risk=CRITICAL` exigem confirmação explícita via terminal antes de executar (ex: apagar arquivos, compras, logins, envio de mensagens).
