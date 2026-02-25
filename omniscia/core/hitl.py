@@ -43,11 +43,12 @@ def require_approval(
     if _risk_rank(plan.risk) < _risk_rank(min_risk):
         return True
 
-    token = secrets.token_hex(2).upper()
+    token = secrets.token_hex(2).upper() if require_token else None
 
-    print("\n[HITL] AÇÃO CRÍTICA DETECTADA")
+    print("\n[HITL] APROVAÇÃO NECESSÁRIA")
     print(f"Intent: {plan.intent}")
     print(f"Risk: {plan.risk} (min_risk={min_risk})")
+    print("Motivo: risk >= min_risk")
     print(f"Plano: {len(plan.tool_calls)} chamada(s) de ferramenta")
     for i, call in enumerate(plan.tool_calls, start=1):
         safe_args = _redact_args(call.args)
@@ -57,9 +58,10 @@ def require_approval(
         print(f"  {i}. {call.tool_name} args={args_str}")
 
     if require_token:
+        assert token is not None
         print(f"\nDigite: YES {token} para autorizar. Qualquer outra coisa cancela.")
     else:
-        print("\nDigite YES para autorizar (ou YES <token>). Qualquer outra coisa cancela.")
+        print("\nDigite YES para autorizar. Qualquer outra coisa cancela.")
     sys.stdout.write("> ")
     sys.stdout.flush()
     answer = sys.stdin.readline().strip()
@@ -71,10 +73,11 @@ def require_approval(
     normalized = " ".join(answer.strip().split())
     up = normalized.upper()
     if require_token:
+        assert token is not None
         if up == f"YES {token}":
             return True
     else:
-        if up == "YES" or up.startswith("YES "):
+        if up == "YES":
             return True
 
     print("[HITL] Negado pelo usuário. Ação cancelada.")
