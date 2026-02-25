@@ -106,16 +106,32 @@ def autofix_command(
 ) -> AutoFixCmdResult:
     """Executa um comando e tenta corrigir falhas via LLM."""
 
+    argv = parse_command(command)
+    if not argv:
+        return AutoFixCmdResult(status="failed", iters=0, summary="comando vazio")
+
+    # Guardrail MVP: este loop é para testes. Permitimos apenas pytest.
+    exe = argv[0].lower().replace("\\", "/")
+    is_pytest = exe.endswith("pytest") or exe.endswith("pytest.exe") or exe == "pytest"
+    is_python_pytest = (
+        exe.endswith("python")
+        or exe.endswith("python.exe")
+        or exe == "python"
+    ) and len(argv) >= 3 and argv[1] == "-m" and argv[2] == "pytest"
+
+    if not (is_pytest or is_python_pytest):
+        return AutoFixCmdResult(
+            status="failed",
+            iters=0,
+            summary="autofix_cmd só permite pytest (use dev.exec com HITL para outros comandos)",
+        )
+
     if not (settings.llm_provider and settings.llm_model and settings.llm_api_key):
         return AutoFixCmdResult(
             status="needs_llm",
             iters=0,
             summary="LLM não configurado (defina OMNI_LLM_PROVIDER/OMNI_LLM_MODEL/OMNI_LLM_API_KEY)",
         )
-
-    argv = parse_command(command)
-    if not argv:
-        return AutoFixCmdResult(status="failed", iters=0, summary="comando vazio")
 
     for i in range(1, max_iters + 1):
         try:

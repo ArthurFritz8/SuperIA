@@ -357,7 +357,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- dev.exec -> {command, timeout_s}\n"
         "- dev.run_python -> {code, timeout_s}\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"
-        "- dev.autofix_cmd -> {command, max_iters, timeout_s}\\n"
+        "- dev.autofix_cmd -> {command, max_iters, timeout_s} (apenas pytest)\\n"
     )
 
     # Não logamos a key; só configuramos no ambiente do litellm.
