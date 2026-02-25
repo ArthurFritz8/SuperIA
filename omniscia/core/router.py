@@ -294,36 +294,74 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
 
     system = (
         "Você é um roteador de ferramentas para um agente autônomo. "
-        "Gere APENAS JSON válido no seguinte formato:\n"
+        "Sua tarefa é transformar a intenção do usuário em um JSON de plano. "
+        "Responda APENAS com JSON válido (sem markdown, sem texto extra).\n\n"
+        "FORMATO:\n"
         "{\n"
         "  \"intent\": string,\n"
         "  \"user_message\": string,\n"
         "  \"risk\": \"LOW\"|\"MEDIUM\"|\"HIGH\"|\"CRITICAL\",\n"
         "  \"tool_calls\": [ { \"tool_name\": string, \"args\": object } ],\n"
         "  \"final_response\": string\n"
-        "}\n"
-        "Ferramentas disponíveis (nomes): echo, write_file. "
-        "Se o usuário pedir para apagar arquivos, comprar, logar, pagar, transferir dinheiro: use risk=CRITICAL."
+        "}\n\n"
+        "REGRAS DE RISCO:\n"
+        "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
+        "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
+        "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
+        "- echo -> {text}\n"
+        "- write_file -> {path, content}\n"
+        "- memory.search -> {query, limit}\n"
+        "- web.get_page_text -> {url, max_chars}\n"
+        "- web.screenshot -> {url, path?}\n"
+        "- fs.list_dir -> {path}\n"
+        "- fs.read_text -> {path, max_chars}\n"
+        "- fs.delete -> {path} (CRITICAL)\n"
+        "- screen.screenshot -> {}\n"
+        "- screen.ocr -> {image_path?}\n"
+        "- gui.get_mouse -> {}\n"
+        "- gui.move_mouse -> {x, y}\n"
+        "- gui.click -> {x, y} (CRITICAL)\n"
+        "- gui.type_text -> {text} (CRITICAL)\n"
+        "- dev.exec -> {command, timeout_s}\n"
+        "- dev.run_python -> {code, timeout_s}\n"
+        "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"
     )
 
     # Não logamos a key; só configuramos no ambiente do litellm.
     import os
 
-    os.environ["LITELLM_PROVIDER"] = settings.llm_provider
-    os.environ["LITELLM_API_KEY"] = settings.llm_api_key
+    llm_provider = settings.llm_provider
+    llm_model = settings.llm_model
+    llm_api_key = settings.llm_api_key
+    if not (llm_provider and llm_model and llm_api_key):
+        return None
+
+    os.environ["LITELLM_PROVIDER"] = llm_provider
+    os.environ["LITELLM_API_KEY"] = llm_api_key
 
     try:
         resp = completion(
-            model=settings.llm_model,
+            model=llm_model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user_message},
             ],
-            temperature=0.2,
+            temperature=0.0,
         )
 
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
-        data: dict[str, Any] = json.loads(content)
+
+        # Robustez: alguns modelos devolvem texto extra. Tentamos extrair o primeiro objeto JSON.
+        raw = content.strip()
+        try:
+            data: dict[str, Any] = json.loads(raw)
+        except Exception:
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                raise
+            data = json.loads(raw[start : end + 1])
+
         return Plan.model_validate(data)
     except Exception:  # noqa: BLE001
         logger.exception("Falha ao rotear via LLM; caindo no heurístico")
