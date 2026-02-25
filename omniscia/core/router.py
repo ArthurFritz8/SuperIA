@@ -388,17 +388,16 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- dev.autofix_cmd -> {command, max_iters, timeout_s} (apenas pytest)\\n"
     )
 
-    # Não logamos a key; só configuramos no ambiente do litellm.
-    import os
-
     llm_provider = settings.llm_provider
     llm_model = settings.llm_model
     llm_api_key = settings.llm_api_key
     if not (llm_provider and llm_model and llm_api_key):
         return None
 
-    os.environ["LITELLM_PROVIDER"] = llm_provider
-    os.environ["LITELLM_API_KEY"] = llm_api_key
+    # Não logamos a key; só configuramos no ambiente do litellm.
+    from omniscia.core.litellm_env import apply_litellm_env
+
+    apply_litellm_env(settings)
 
     try:
         resp = completion(

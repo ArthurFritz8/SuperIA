@@ -248,10 +248,9 @@ def _ask_llm_for_edits(
         "files": files,
     }
 
-    import os
+    from omniscia.core.litellm_env import apply_litellm_env
 
-    os.environ["LITELLM_PROVIDER"] = settings.llm_provider
-    os.environ["LITELLM_API_KEY"] = settings.llm_api_key
+    apply_litellm_env(settings)
 
     try:
         resp = completion(

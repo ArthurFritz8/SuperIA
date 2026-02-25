@@ -143,17 +143,14 @@ def _ask_llm_for_fixed_file(
         f"{stderr}\n"
     )
 
-    import os
-
     if not (settings.llm_provider and settings.llm_model and settings.llm_api_key):
         return None
 
-    llm_provider: str = settings.llm_provider
     llm_model: str = settings.llm_model
-    llm_api_key: str = settings.llm_api_key
 
-    os.environ["LITELLM_PROVIDER"] = llm_provider
-    os.environ["LITELLM_API_KEY"] = llm_api_key
+    from omniscia.core.litellm_env import apply_litellm_env
+
+    apply_litellm_env(settings)
 
     try:
         resp = completion(
