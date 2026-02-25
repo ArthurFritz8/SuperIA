@@ -44,7 +44,7 @@ class Settings:
 
     # Segurança
     hitl_enabled: bool = True
-    hitl_min_risk: RiskLevel = RiskLevel.CRITICAL
+    hitl_min_risk: RiskLevel = RiskLevel.HIGH
     hitl_require_token: bool = False
 
     # Web (Playwright)
@@ -80,14 +80,14 @@ class Settings:
 
         hitl_min_risk_env = os.getenv("OMNI_HITL_MIN_RISK")
         if hitl_min_risk_env is None or not hitl_min_risk_env.strip():
-            # Default seguro: se LLM está ativo, exigimos aprovação a partir de HIGH.
-            hitl_min_risk_raw = "HIGH" if router_mode == "llm" else "CRITICAL"
+            # Default seguro: exigir aprovação a partir de HIGH.
+            hitl_min_risk_raw = "HIGH"
         else:
             hitl_min_risk_raw = hitl_min_risk_env.strip().upper()
         try:
             hitl_min_risk = RiskLevel(hitl_min_risk_raw)
         except Exception:
-            hitl_min_risk = RiskLevel.CRITICAL
+            hitl_min_risk = RiskLevel.HIGH
 
         web_headless = (os.getenv("OMNI_WEB_HEADLESS", "true").strip().lower() != "false")
         web_assume_https = (

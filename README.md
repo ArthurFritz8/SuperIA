@@ -177,6 +177,8 @@ Se faltar chave/deps/microfone, o sistema cai automaticamente para modo texto.
 
 ## Segurança (HITL)
 
+Por padrão, o HITL exige aprovação humana a partir de ações `HIGH` (e sempre para `CRITICAL`). Ajuste com `OMNI_HITL_MIN_RISK`.
+
 Ações marcadas como `risk=CRITICAL` exigem confirmação explícita via terminal antes de executar (ex: apagar arquivos, compras, logins, envio de mensagens).
 
 ---

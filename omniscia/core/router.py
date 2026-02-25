@@ -310,7 +310,7 @@ def _route_heuristic(user_message: str) -> Plan:
                 ToolCall(
                     tool_name="write_file",
                     args={
-                        "path": "notes.txt",
+                        "path": "data/tmp/notes.txt",
                         "content": f"Comando: {msg}\n",
                     },
                 )
