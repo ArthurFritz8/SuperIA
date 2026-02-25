@@ -208,5 +208,7 @@ Comandos heurísticos:
 
 Auto-correção (requer LLM configurado):
 - `autofix caminho/arquivo.py`
+- `autofixcmd: pytest -q`
+- `corrigir testes`
 
 Por segurança, o executor roda sem shell e só permite executáveis allowlisted (python/pytest/git) neste estágio.

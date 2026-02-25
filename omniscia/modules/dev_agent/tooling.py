@@ -17,6 +17,7 @@ from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
 from omniscia.modules.dev_agent.sandbox import parse_command, python_argv, run_command
 from omniscia.modules.dev_agent.autofix import autofix_python_file
+from omniscia.modules.dev_agent.autofix_cmd import autofix_command
 
 # Import leve: Settings vem do core e não puxa dependências pesadas.
 from omniscia.core.config import Settings
@@ -47,6 +48,15 @@ def register_dev_tools(registry: ToolRegistry) -> None:
             description="Roda um arquivo Python e tenta auto-corrigir via LLM (opcional)",
             risk="HIGH",
             fn=_dev_autofix_python_file,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="dev.autofix_cmd",
+            description="Roda um comando (ex: pytest) e tenta auto-corrigir via LLM (opcional)",
+            risk="HIGH",
+            fn=_dev_autofix_cmd,
         )
     )
 
@@ -123,6 +133,25 @@ def _dev_autofix_python_file(args: dict[str, Any]) -> ToolResult:
 
     settings = Settings.load()
     res = autofix_python_file(settings=settings, path=path, max_iters=max_iters, timeout_s=timeout_s)
+
+    if res.status == "ok":
+        return ToolResult(status="ok", output=f"autofix ok in {res.iters} iter(s): {res.summary}")
+    if res.status == "needs_llm":
+        return ToolResult(status="error", error=res.summary)
+
+    return ToolResult(status="error", error=f"autofix failed after {res.iters} iter(s): {res.summary}")
+
+
+def _dev_autofix_cmd(args: dict[str, Any]) -> ToolResult:
+    command = str(args.get("command", "")).strip()
+    max_iters = int(args.get("max_iters", 3) or 3)
+    timeout_s = float(args.get("timeout_s", 120.0) or 120.0)
+
+    if not command:
+        return ToolResult(status="error", error="informe command")
+
+    settings = Settings.load()
+    res = autofix_command(settings=settings, command=command, max_iters=max_iters, timeout_s=timeout_s)
 
     if res.status == "ok":
         return ToolResult(status="ok", output=f"autofix ok in {res.iters} iter(s): {res.summary}")

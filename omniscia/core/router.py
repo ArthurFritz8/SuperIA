@@ -121,6 +121,38 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, vou tentar corrigir o arquivo e executar novamente.",
         )
 
+    # Regra: DEV - auto-fix por comando (ex: "autofixcmd: pytest -q")
+    m = re.search(r"\b(autofixcmd|auto\s*fix\s*cmd)\b\s*[:]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        command = m.group(2).strip()
+        return Plan(
+            intent="dev.autofix_cmd",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(
+                    tool_name="dev.autofix_cmd",
+                    args={"command": command, "max_iters": 3, "timeout_s": 120},
+                )
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok, vou tentar corrigir até o comando passar.",
+        )
+
+    # Regra: DEV - corrigir testes (atalho para pytest)
+    if re.search(r"\b(corrigir testes|arrumar testes|fix tests|rodar testes|run tests)\b", norm):
+        return Plan(
+            intent="dev.autofix_cmd",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(
+                    tool_name="dev.autofix_cmd",
+                    args={"command": "pytest -q", "max_iters": 3, "timeout_s": 180},
+                )
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok, vou rodar os testes e tentar corrigir o que falhar.",
+        )
+
     # Regra: GUI - mover mouse (ex: "mover mouse 100 200")
     m = re.search(r"\b(mover mouse|move mouse)\b\s+(\d+)\s+(\d+)", norm)
     if m:
@@ -325,6 +357,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- dev.exec -> {command, timeout_s}\n"
         "- dev.run_python -> {code, timeout_s}\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"
+        "- dev.autofix_cmd -> {command, max_iters, timeout_s}\\n"
     )
 
     # Não logamos a key; só configuramos no ambiente do litellm.
