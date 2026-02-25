@@ -14,6 +14,7 @@ Observação importante:
 from __future__ import annotations
 
 import logging
+import re
 from rich.console import Console
 from rich.panel import Panel
 
@@ -86,7 +87,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
     effective_risk = _effective_risk_for_plan(plan, registry)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
-    normalized_plan, normalize_note = _normalize_plan_args(effective_plan)
+    normalized_plan, normalize_note = _normalize_plan_args(effective_plan, settings=settings)
     if normalize_note:
         memory.append(
             "plan_normalized_args",
@@ -173,7 +174,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         memory.append("agent_response", {"text": "Feito."})
 
 
-def _normalize_plan_args(plan: Plan) -> tuple[Plan, str | None]:
+def _normalize_plan_args(plan: Plan, *, settings: Settings) -> tuple[Plan, str | None]:
     """Normaliza args de tool calls (sem relaxar regras de segurança).
 
     Ex.: remover aspas, trocar \\ por / em paths, converter números.
@@ -184,7 +185,7 @@ def _normalize_plan_args(plan: Plan) -> tuple[Plan, str | None]:
     new_calls: list[ToolCall] = []
 
     for call in plan.tool_calls:
-        norm_args, note, did_change = _normalize_tool_args(call.tool_name, call.args)
+        norm_args, note, did_change = _normalize_tool_args(call.tool_name, call.args, settings=settings)
         if did_change:
             changed = True
         if note:
@@ -197,7 +198,7 @@ def _normalize_plan_args(plan: Plan) -> tuple[Plan, str | None]:
     return plan.model_copy(update={"tool_calls": new_calls}), "; ".join(notes)[:300]
 
 
-def _normalize_tool_args(tool_name: str, args: dict) -> tuple[dict, str | None, bool]:
+def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> tuple[dict, str | None, bool]:
     a = dict(args or {})
     did = False
     note_parts: list[str] = []
@@ -232,6 +233,9 @@ def _normalize_tool_args(tool_name: str, args: dict) -> tuple[dict, str | None, 
     if tool_name in {"web.get_page_text", "web.screenshot"} and "url" in a:
         before = a.get("url")
         after = norm_str(before)
+        if settings.web_assume_https and after and not after.lower().startswith(("http://", "https://")):
+            after = "https://" + after
+            note_parts.append("assumed https")
         if before != after:
             a["url"] = after
             did = True
@@ -379,6 +383,15 @@ def _is_http_url(url: str) -> bool:
     return u.startswith("http://") or u.startswith("https://")
 
 
+def _looks_like_domain(url: str) -> bool:
+    u = (url or "").strip()
+    if not u or " " in u:
+        return False
+    if u.startswith("/") or ":" in u:
+        return False
+    return bool(re.search(r"^[a-zA-Z0-9][\w.-]+\.[a-zA-Z]{2,}(/.*)?$", u))
+
+
 def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str | None:
     # Tool desconhecida => bloqueia.
     try:
@@ -404,6 +417,8 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
     if tool_name == "web.screenshot":
         url = str(a.get("url", "")).strip()
         if not _is_http_url(url):
+            if _looks_like_domain(url):
+                return f"url inválida (use http/https). Tente: https://{url}"
             return "url inválida (use http/https)"
         out_path = a.get("path")
         if out_path is not None and str(out_path).strip():
@@ -413,6 +428,8 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
     if tool_name == "web.get_page_text":
         url = str(a.get("url", "")).strip()
         if not _is_http_url(url):
+            if _looks_like_domain(url):
+                return f"url inválida (use http/https). Tente: https://{url}"
             return "url inválida (use http/https)"
 
     if tool_name == "dev.autofix_python_file":

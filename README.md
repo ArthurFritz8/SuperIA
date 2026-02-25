@@ -124,6 +124,8 @@ SuperIA/
 - **Playwright** (recomendado) para automação robusta
 - Alternativa: Selenium (se necessário)
 
+Obs: por padrão, URLs precisam incluir `http://` ou `https://`. Opcionalmente, você pode habilitar `OMNI_WEB_ASSUME_HTTPS=true` para assumir `https://` quando vier "example.com".
+
 ### Memória / RAG
 - Vetor DB local: `chromadb`
 - Embeddings:

@@ -222,8 +222,14 @@ def _route_heuristic(user_message: str) -> Plan:
     # Regra: web read-only (ler página)
     # Se detectar uma URL ou intenção clara de abrir/ler um site.
     m = re.search(r"https?://\S+", msg)
-    if m or re.search(r"\b(abra|abrir|ler|leia|resuma|resumir)\b.*\b(site|pagina)\b", norm):
-        url = m.group(0) if m else ""
+    wants_web = bool(m) or bool(re.search(r"\b(abra|abrir|ler|leia|resuma|resumir)\b.*\b(site|pagina)\b", norm))
+    if wants_web:
+        if m:
+            url = m.group(0)
+        else:
+            # Extrai algo que pareça domínio (com path opcional), ex: example.com/foo
+            m2 = re.search(r"\b([a-zA-Z0-9][\w.-]+\.[a-zA-Z]{2,}(?:/[^\s]*)?)\b", msg)
+            url = m2.group(1) if m2 else ""
         return Plan(
             intent="web.read",
             user_message=msg,

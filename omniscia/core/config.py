@@ -49,6 +49,7 @@ class Settings:
 
     # Web (Playwright)
     web_headless: bool = True
+    web_assume_https: bool = False
 
     # OCR (Tesseract)
     # No Windows, às vezes o tesseract.exe não está no PATH.
@@ -89,6 +90,9 @@ class Settings:
             hitl_min_risk = RiskLevel.CRITICAL
 
         web_headless = (os.getenv("OMNI_WEB_HEADLESS", "true").strip().lower() != "false")
+        web_assume_https = (
+            os.getenv("OMNI_WEB_ASSUME_HTTPS", "false").strip().lower() == "true"
+        )
 
         tesseract_cmd = os.getenv("OMNI_TESSERACT_CMD") or None
 
@@ -146,6 +150,7 @@ class Settings:
             hitl_min_risk=hitl_min_risk,
             hitl_require_token=hitl_require_token,
             web_headless=web_headless,
+            web_assume_https=web_assume_https,
             tesseract_cmd=tesseract_cmd,
             log_level=log_level,
         )
