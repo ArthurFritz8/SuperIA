@@ -71,6 +71,30 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Tirei uma captura de tela.",
         )
 
+    # Regra: abrir Explorador / gerenciador de arquivos
+    if re.search(r"\b(explorador|explorer|gerenciador de arquivos|arquivos)\b", norm) and re.search(
+        r"\b(abrir|abra|abre|open)\b", norm
+    ):
+        return Plan(
+            intent="os.open_explorer",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.open_explorer", args={"path": "."})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, abri o Explorador de Arquivos.",
+        )
+
+    # Regra: abrir YouTube no navegador padrão
+    if "youtube" in norm and re.search(r"\b(abrir|abra|abre|open)\b", norm):
+        return Plan(
+            intent="os.open_url",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(tool_name="os.open_url", args={"url": "https://www.youtube.com/"})
+            ],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, abri o YouTube no seu navegador.",
+        )
+
     # Regra: OCR
     if re.search(r"\b(ocr|ler tela|leia a tela|o que esta escrito|o que esta na tela)\b", norm):
         return Plan(
@@ -380,6 +404,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- core.list_tools -> {}\n"
         "- echo -> {text}\n"
         "- write_file -> {path, content}\n"
+        "- os.open_url -> {url} (apenas http/https)\n"
+        "- os.open_explorer -> {path?} (path relativo; default '.')\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
         "- web.screenshot -> {url, path?}\n"
@@ -392,6 +418,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- gui.move_mouse -> {x, y}\n"
         "- gui.click -> {x, y} (CRITICAL)\n"
         "- gui.type_text -> {text} (CRITICAL)\n"
+        "IMPORTANTE: Para abrir sites/apps/pastas, use os.open_url/os.open_explorer (NÃO use dev.exec).\n"
         "- dev.exec -> {command, timeout_s}\n"
         "- dev.run_python -> {code, timeout_s}\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"

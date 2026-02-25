@@ -217,6 +217,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("GUI tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools de abrir recursos no SO (Explorer/URLs)
+    try:
+        from omniscia.modules.os_control.openers import register_open_tools
+
+        register_open_tools(registry)
+    except Exception:
+        logger.info("Open tools indisponíveis (erro ao importar/registrar).")
+
     # Tools de visão (screenshot)
     try:
         from omniscia.modules.vision.screenshot import register_vision_tools
