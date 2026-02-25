@@ -62,7 +62,7 @@ class ToolRegistry:
             return ToolResult(status="error", error=str(exc))
 
 
-def build_default_registry() -> ToolRegistry:
+def build_default_registry(*, settings=None) -> ToolRegistry:
     """Registra um conjunto mínimo de ferramentas para o MVP.
 
     Neste primeiro passo, criamos apenas tools "seguras" e stubs.
@@ -113,5 +113,16 @@ def build_default_registry() -> ToolRegistry:
             fn=tool_write_file,
         )
     )
+
+    # Registro opcional de ferramentas web.
+    # Import lazy para evitar dependência dura de Playwright neste estágio.
+    if settings is not None:
+        try:
+            from omniscia.modules.web.tooling import register_web_tools
+
+            register_web_tools(registry, settings)
+        except Exception:
+            # Se o módulo ou dependência não existir, seguimos só com o core.
+            logger.info("Web tools indisponíveis (Playwright não instalado ou erro ao importar).")
 
     return registry

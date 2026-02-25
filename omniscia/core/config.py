@@ -37,6 +37,9 @@ class Settings:
     # Segurança
     hitl_enabled: bool = True
 
+    # Web (Playwright)
+    web_headless: bool = True
+
     # Logs
     log_level: str = "INFO"
 
@@ -56,6 +59,8 @@ class Settings:
         stt_mode = os.getenv("OMNI_STT_MODE", "text").strip() or "text"
         tts_mode = os.getenv("OMNI_TTS_MODE", "none").strip() or "none"
         hitl_enabled = (os.getenv("OMNI_HITL_ENABLED", "true").strip().lower() != "false")
+
+        web_headless = (os.getenv("OMNI_WEB_HEADLESS", "true").strip().lower() != "false")
 
         llm_provider = os.getenv("OMNI_LLM_PROVIDER") or None
         llm_model = os.getenv("OMNI_LLM_MODEL") or None
@@ -79,5 +84,6 @@ class Settings:
             stt_mode=stt_mode,  # type: ignore[arg-type]
             tts_mode=tts_mode,  # type: ignore[arg-type]
             hitl_enabled=hitl_enabled,
+            web_headless=web_headless,
             log_level=log_level,
         )

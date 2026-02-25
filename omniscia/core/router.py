@@ -35,6 +35,19 @@ def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     lower = msg.lower()
 
+    # Regra: web read-only (ler página)
+    # Se detectar uma URL ou intenção clara de abrir/ler um site.
+    m = re.search(r"https?://\S+", msg)
+    if m or re.search(r"\b(abra|abrir|ler|leia|resuma|resumir)\b.*\b(site|página|pagina)\b", lower):
+        url = m.group(0) if m else ""
+        return Plan(
+            intent="web.read",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="web.get_page_text", args={"url": url, "max_chars": 6000})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, vou abrir a página e extrair o texto (read-only).",
+        )
+
     # Regra 0: saída
     if lower in {"sair", "exit", "quit"}:
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")

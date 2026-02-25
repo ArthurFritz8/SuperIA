@@ -31,7 +31,7 @@ def run_brain_loop(settings: Settings) -> None:
     """Loop REPL do agente."""
 
     console = Console()
-    registry = build_default_registry()
+    registry = build_default_registry(settings=settings)
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
