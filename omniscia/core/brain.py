@@ -24,6 +24,7 @@ from omniscia.core.router import route
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan
 from omniscia.modules.stt.factory import build_stt
+from omniscia.modules.memory.store import JsonlMemoryStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,8 @@ def run_brain_loop(settings: Settings) -> None:
     """Loop REPL do agente."""
 
     console = Console()
-    registry = build_default_registry(settings=settings)
+    memory = JsonlMemoryStore()
+    registry = build_default_registry(settings=settings, memory_store=memory)
     stt = build_stt(settings, console=console)
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
@@ -61,16 +63,27 @@ def run_brain_loop(settings: Settings) -> None:
         if not user_message:
             continue
 
+        memory.append("user_message", {"text": user_message})
+
         plan = route(settings, user_message)
+
+        memory.append(
+            "plan",
+            {
+                "intent": plan.intent,
+                "risk": str(plan.risk),
+                "tool_calls": [c.model_dump() for c in plan.tool_calls],
+            },
+        )
 
         if plan.intent == "exit":
             console.print(plan.final_response or "Encerrando.")
             return
 
-        _execute_plan(console, settings, registry, plan)
+        _execute_plan(console, settings, registry, plan, memory)
 
 
-def _execute_plan(console: Console, settings: Settings, registry, plan: Plan) -> None:
+def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
     console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
 
     if not require_approval(plan, enabled=settings.hitl_enabled):
@@ -85,6 +98,17 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan) ->
             console.print("Agente> Tive um erro executando o plano.")
             return
 
+        memory.append(
+            "tool_output",
+            {
+                "tool": call.tool_name,
+                "args": call.args,
+                "status": result.status,
+                "output": result.output,
+                "error": result.error,
+            },
+        )
+
         # Observabilidade do MVP:
         # - Em agentes, tool output é parte essencial do feedback loop.
         # - Truncamos para não poluir o terminal nem expor dados demais por acidente.
@@ -96,5 +120,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan) ->
 
     if plan.final_response:
         console.print(f"Agente> {plan.final_response}")
+        memory.append("agent_response", {"text": plan.final_response})
     else:
         console.print("Agente> Feito.")
+        memory.append("agent_response", {"text": "Feito."})

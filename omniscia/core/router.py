@@ -35,6 +35,19 @@ def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     lower = msg.lower()
 
+    # Regra: memória
+    if re.search(r"\b(lembra|lembrar|memória|memoria|o que falamos|histórico|historico)\b", lower):
+        # Extrai query simples removendo palavras comuns.
+        q = re.sub(r"\b(lembra|lembrar|memória|memoria|o que falamos|histórico|historico)\b", "", lower)
+        q = q.strip() or msg
+        return Plan(
+            intent="memory.search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="memory.search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.LOW,
+            final_response="Busquei na memória recente.",
+        )
+
     # Regra: web read-only (ler página)
     # Se detectar uma URL ou intenção clara de abrir/ler um site.
     m = re.search(r"https?://\S+", msg)

@@ -62,7 +62,7 @@ class ToolRegistry:
             return ToolResult(status="error", error=str(exc))
 
 
-def build_default_registry(*, settings=None) -> ToolRegistry:
+def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     """Registra um conjunto mínimo de ferramentas para o MVP.
 
     Neste primeiro passo, criamos apenas tools "seguras" e stubs.
@@ -113,6 +113,15 @@ def build_default_registry(*, settings=None) -> ToolRegistry:
             fn=tool_write_file,
         )
     )
+
+    # Registro de ferramentas de memória (baseline JSONL).
+    if memory_store is not None:
+        try:
+            from omniscia.modules.memory.tooling import register_memory_tools
+
+            register_memory_tools(registry, memory_store)
+        except Exception:
+            logger.info("Memory tools indisponíveis (erro ao importar/registrar).")
 
     # Registro opcional de ferramentas web.
     # Import lazy para evitar dependência dura de Playwright neste estágio.
