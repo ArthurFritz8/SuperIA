@@ -42,6 +42,12 @@ def _normalize(text: str) -> str:
 
 
 def route(settings: Settings, user_message: str) -> Plan:
+    # Exit must be handled deterministically before any LLM routing.
+    # Otherwise the LLM may hallucinate a destructive action (e.g., shutdown).
+    if _normalize(user_message) in {"sair", "exit", "quit"}:
+        msg = user_message.strip()
+        return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
+
     if settings.router_mode == "llm":
         plan = _route_with_llm(settings, user_message)
         if plan is not None:
