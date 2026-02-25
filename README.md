@@ -206,4 +206,7 @@ Comandos heurísticos:
 - `python: print(2+2)`
 - `executar: python -c "print('ok')"`
 
+Auto-correção (requer LLM configurado):
+- `autofix caminho/arquivo.py`
+
 Por segurança, o executor roda sem shell e só permite executáveis allowlisted (python/pytest/git) neste estágio.

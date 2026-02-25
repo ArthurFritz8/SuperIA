@@ -104,6 +104,23 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, vou executar esse Python.",
         )
 
+    # Regra: DEV - auto-fix de arquivo python (ex: "autofix script.py")
+    m = re.search(r"\b(autofix|auto\s*fix|corrigir)\b\s+([\w\-./\\]+\.py)\b", norm)
+    if m:
+        path = m.group(2).strip().replace("\\", "/")
+        return Plan(
+            intent="dev.autofix_python_file",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(
+                    tool_name="dev.autofix_python_file",
+                    args={"path": path, "max_iters": 3, "timeout_s": 60},
+                )
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok, vou tentar corrigir o arquivo e executar novamente.",
+        )
+
     # Regra: GUI - mover mouse (ex: "mover mouse 100 200")
     m = re.search(r"\b(mover mouse|move mouse)\b\s+(\d+)\s+(\d+)", norm)
     if m:
