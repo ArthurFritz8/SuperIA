@@ -21,7 +21,7 @@ from omniscia.core.config import Settings
 from omniscia.core.hitl import require_approval
 from omniscia.core.router import route
 from omniscia.core.tools import build_default_registry
-from omniscia.core.types import Plan, RiskLevel
+from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.memory.store import JsonlMemoryStore
 
@@ -86,16 +86,27 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
     effective_risk = _effective_risk_for_plan(plan, registry)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
-    preflight_error = _preflight_validate_plan(effective_plan, registry)
+    normalized_plan, normalize_note = _normalize_plan_args(effective_plan)
+    if normalize_note:
+        memory.append(
+            "plan_normalized_args",
+            {
+                "intent": effective_plan.intent,
+                "note": normalize_note,
+                "tool_calls": [c.model_dump() for c in normalized_plan.tool_calls],
+            },
+        )
+
+    preflight_error = _preflight_validate_plan(normalized_plan, registry)
     if preflight_error:
         console.print(f"[red]Preflight error:[/red] {preflight_error}")
         memory.append(
             "preflight_error",
             {
-                "intent": effective_plan.intent,
-                "risk": str(effective_plan.risk),
+                "intent": normalized_plan.intent,
+                "risk": str(normalized_plan.risk),
                 "error": preflight_error,
-                "tool_calls": [c.model_dump() for c in effective_plan.tool_calls],
+                "tool_calls": [c.model_dump() for c in normalized_plan.tool_calls],
             },
         )
         console.print("Agente> Não executei por segurança.")
@@ -118,7 +129,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         )
 
     if not require_approval(
-        effective_plan,
+        normalized_plan,
         enabled=settings.hitl_enabled,
         min_risk=settings.hitl_min_risk,
         require_token=settings.hitl_require_token,
@@ -127,7 +138,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         return
 
     # Execução sequencial simples.
-    for call in plan.tool_calls:
+    for call in normalized_plan.tool_calls:
         result = registry.run(call.tool_name, call.args)
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
@@ -154,12 +165,140 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
                 out = out[:2000] + "\n... [truncado]"
             console.print(Panel(out, title=f"Tool: {call.tool_name}"))
 
-    if plan.final_response:
-        console.print(f"Agente> {plan.final_response}")
-        memory.append("agent_response", {"text": plan.final_response})
+    if normalized_plan.final_response:
+        console.print(f"Agente> {normalized_plan.final_response}")
+        memory.append("agent_response", {"text": normalized_plan.final_response})
     else:
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
+
+
+def _normalize_plan_args(plan: Plan) -> tuple[Plan, str | None]:
+    """Normaliza args de tool calls (sem relaxar regras de segurança).
+
+    Ex.: remover aspas, trocar \\ por / em paths, converter números.
+    """
+
+    changed = False
+    notes: list[str] = []
+    new_calls: list[ToolCall] = []
+
+    for call in plan.tool_calls:
+        norm_args, note, did_change = _normalize_tool_args(call.tool_name, call.args)
+        if did_change:
+            changed = True
+        if note:
+            notes.append(f"{call.tool_name}: {note}")
+        new_calls.append(call.model_copy(update={"args": norm_args}))
+
+    if not changed:
+        return plan, None
+
+    return plan.model_copy(update={"tool_calls": new_calls}), "; ".join(notes)[:300]
+
+
+def _normalize_tool_args(tool_name: str, args: dict) -> tuple[dict, str | None, bool]:
+    a = dict(args or {})
+    did = False
+    note_parts: list[str] = []
+
+    def norm_str(v) -> str:
+        return str(v).strip()
+
+    def norm_path(v) -> str:
+        s = norm_str(v)
+        s = s.strip('"').strip("'")
+        s = s.replace("\\", "/")
+        return s
+
+    # Paths comuns
+    if tool_name in {"write_file", "fs.list_dir", "fs.read_text", "fs.delete"} and "path" in a:
+        before = a.get("path")
+        after = norm_path(before)
+        if before != after:
+            a["path"] = after
+            did = True
+            note_parts.append("path normalized")
+
+    if tool_name == "screen.ocr" and "image_path" in a and a.get("image_path") is not None:
+        before = a.get("image_path")
+        after = norm_path(before)
+        if before != after:
+            a["image_path"] = after
+            did = True
+            note_parts.append("image_path normalized")
+
+    # Web URLs
+    if tool_name in {"web.get_page_text", "web.screenshot"} and "url" in a:
+        before = a.get("url")
+        after = norm_str(before)
+        if before != after:
+            a["url"] = after
+            did = True
+            note_parts.append("url trimmed")
+
+    if tool_name == "web.screenshot" and "path" in a and a.get("path") is not None:
+        before = a.get("path")
+        after = norm_path(before)
+        if before != after:
+            a["path"] = after
+            did = True
+            note_parts.append("output path normalized")
+
+    # Números
+    if tool_name == "memory.search":
+        if "limit" in a:
+            try:
+                a["limit"] = int(str(a.get("limit")))
+                did = True
+                note_parts.append("limit int")
+            except Exception:
+                pass
+
+    if tool_name in {"web.get_page_text", "fs.read_text"}:
+        if "max_chars" in a:
+            try:
+                a["max_chars"] = int(str(a.get("max_chars")))
+                did = True
+                note_parts.append("max_chars int")
+            except Exception:
+                pass
+
+    if tool_name in {"gui.move_mouse", "gui.click"}:
+        for k in ("x", "y"):
+            if k in a:
+                try:
+                    a[k] = int(str(a.get(k)))
+                    did = True
+                except Exception:
+                    pass
+
+    if tool_name == "dev.exec" and "command" in a:
+        before = a.get("command")
+        after = norm_str(before)
+        if before != after:
+            a["command"] = after
+            did = True
+            note_parts.append("command trimmed")
+
+    if tool_name in {"dev.autofix_python_file"} and "path" in a:
+        before = a.get("path")
+        after = norm_path(before)
+        if before != after:
+            a["path"] = after
+            did = True
+            note_parts.append("path normalized")
+
+    if tool_name == "dev.autofix_cmd" and "command" in a:
+        before = a.get("command")
+        after = norm_str(before)
+        if before != after:
+            a["command"] = after
+            did = True
+            note_parts.append("command trimmed")
+
+    note = ", ".join(note_parts) if note_parts else None
+    return a, note, did
 
 
 def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
