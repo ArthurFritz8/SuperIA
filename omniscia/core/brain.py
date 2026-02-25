@@ -14,7 +14,6 @@ Observação importante:
 from __future__ import annotations
 
 import logging
-
 from rich.console import Console
 from rich.panel import Panel
 
@@ -86,6 +85,21 @@ def run_brain_loop(settings: Settings) -> None:
 def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
     effective_risk = _effective_risk_for_plan(plan, registry)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
+
+    preflight_error = _preflight_validate_plan(effective_plan, registry)
+    if preflight_error:
+        console.print(f"[red]Preflight error:[/red] {preflight_error}")
+        memory.append(
+            "preflight_error",
+            {
+                "intent": effective_plan.intent,
+                "risk": str(effective_plan.risk),
+                "error": preflight_error,
+                "tool_calls": [c.model_dump() for c in effective_plan.tool_calls],
+            },
+        )
+        console.print("Agente> Não executei por segurança.")
+        return
 
     if effective_plan.risk != plan.risk:
         memory.append(
@@ -188,3 +202,120 @@ def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
             current = tool_risk
 
     return current
+
+
+def _preflight_validate_plan(plan: Plan, registry) -> str | None:
+    """Valida tool calls antes de executar.
+
+    Objetivo:
+    - Defesa em profundidade: não depende só do router nem só das tools.
+    - Falha cedo antes de pedir HITL/executar.
+
+    Política (MVP):
+    - Paths devem ser relativos, sem '..' e sem drive.
+    - URLs devem ser http(s) quando exigidas.
+    - Campos obrigatórios devem existir.
+    """
+
+    for call in plan.tool_calls:
+        err = _preflight_validate_tool_call(call.tool_name, call.args, registry)
+        if err:
+            return f"{call.tool_name}: {err}"
+    return None
+
+
+def _is_safe_rel_path(path: str) -> bool:
+    p = (path or "").strip().replace("\\", "/")
+    if not p:
+        return False
+    if p.startswith("/") or ":" in p:
+        return False
+    if ".." in p.split("/"):
+        return False
+    return True
+
+
+def _is_http_url(url: str) -> bool:
+    u = (url or "").strip().lower()
+    return u.startswith("http://") or u.startswith("https://")
+
+
+def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str | None:
+    # Tool desconhecida => bloqueia.
+    try:
+        registry.get(tool_name)
+    except Exception:
+        return "tool não registrada"
+
+    a = args or {}
+
+    # Paths
+    if tool_name in {"write_file", "fs.list_dir", "fs.read_text", "fs.delete"}:
+        path = str(a.get("path", "")).strip()
+        if not _is_safe_rel_path(path) and path != ".":
+            return "path inválido (use path relativo, sem '..' e sem drive)"
+
+    if tool_name == "screen.ocr":
+        image_path = a.get("image_path")
+        if image_path is not None:
+            p = str(image_path).strip()
+            if p and not _is_safe_rel_path(p):
+                return "image_path inválido (use path relativo)"
+
+    if tool_name == "web.screenshot":
+        url = str(a.get("url", "")).strip()
+        if not _is_http_url(url):
+            return "url inválida (use http/https)"
+        out_path = a.get("path")
+        if out_path is not None and str(out_path).strip():
+            if not _is_safe_rel_path(str(out_path)):
+                return "path inválido (use path relativo)"
+
+    if tool_name == "web.get_page_text":
+        url = str(a.get("url", "")).strip()
+        if not _is_http_url(url):
+            return "url inválida (use http/https)"
+
+    if tool_name == "dev.autofix_python_file":
+        path = str(a.get("path", "")).strip()
+        if not _is_safe_rel_path(path) or not path.lower().endswith(".py"):
+            return "path inválido (use path relativo .py)"
+
+    if tool_name == "dev.autofix_cmd":
+        command = str(a.get("command", "")).strip()
+        if not command:
+            return "command vazio"
+
+    if tool_name == "dev.exec":
+        command = str(a.get("command", "")).strip()
+        if not command:
+            return "command vazio"
+        if len(command) > 5000:
+            return "command muito longo"
+
+    if tool_name == "dev.run_python":
+        # Pelo menos um entre code/module/script.
+        if not any(k in a and str(a.get(k, "")).strip() for k in ("code", "module", "script")):
+            return "informe code, module ou script"
+        if a.get("script"):
+            script = str(a.get("script", "")).strip()
+            if not _is_safe_rel_path(script):
+                return "script inválido (use path relativo)"
+
+    # GUI args básicos
+    if tool_name in {"gui.move_mouse", "gui.click"}:
+        for k in ("x", "y"):
+            if k not in a:
+                return f"faltando {k}"
+            try:
+                val = a.get(k, "")
+                int(str(val))
+            except Exception:
+                return f"{k} deve ser int"
+
+    if tool_name == "gui.type_text":
+        if "text" not in a:
+            return "faltando text"
+
+    # Qualquer outra tool: sem validação extra aqui.
+    return None

@@ -283,9 +283,9 @@ def _route_heuristic(user_message: str) -> Plan:
         )
 
     # Regra: ler arquivo
-    m = re.search(r"\b(ler|leia|cat|abrir)\b\s+([\w\-./\\]+)", norm)
+    m = re.search(r"\b(ler|leia|cat|abrir)\b\s+([^\s]+)", msg, flags=re.IGNORECASE)
     if m and m.group(2):
-        path = m.group(2).strip().replace("\\", "/")
+        path = m.group(2).strip().strip('"').strip("'").replace("\\", "/")
         return Plan(
             intent="filesystem.read",
             user_message=msg,
