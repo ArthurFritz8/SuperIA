@@ -152,6 +152,16 @@ Obs: por padrão, URLs precisam incluir `http://` ou `https://`. Opcionalmente, 
 
 - `python -m omniscia.app`
 
+### Windows (atalhos)
+
+- Rodar por duplo-clique (abre um CMD e executa):
+  - [scripts/windows/run_omniscia.bat](scripts/windows/run_omniscia.bat)
+
+- Gerar um executável (EXE) com PyInstaller:
+  - Rode: [scripts/windows/build_exe.bat](scripts/windows/build_exe.bat)
+  - Depois execute: `dist\omniscia.exe run`
+  - Atalho para rodar o EXE: [scripts/windows/run_omniscia_exe.bat](scripts/windows/run_omniscia_exe.bat)
+
 O MVP roda em **modo texto**, usando LLM opcional. Se `OMNI_LLM_PROVIDER` não estiver configurado, ele usa um roteador heurístico simples.
 
 Comando útil dentro do agente:

@@ -8,6 +8,11 @@ __pycache__/
 .build/
 .venv/
 
+# PyInstaller
+dist/
+build/
+*.spec
+
 # Env
 .env
 
