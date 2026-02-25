@@ -22,7 +22,7 @@ from omniscia.core.config import Settings
 from omniscia.core.hitl import require_approval
 from omniscia.core.router import route
 from omniscia.core.tools import build_default_registry
-from omniscia.core.types import Plan
+from omniscia.core.types import Plan, RiskLevel
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.memory.store import JsonlMemoryStore
 
@@ -84,10 +84,27 @@ def run_brain_loop(settings: Settings) -> None:
 
 
 def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
-    console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
+    effective_risk = _effective_risk_for_plan(plan, registry)
+    effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
+
+    if effective_plan.risk != plan.risk:
+        memory.append(
+            "plan_effective_risk",
+            {"intent": plan.intent, "router_risk": str(plan.risk), "effective_risk": str(effective_plan.risk)},
+        )
+
+    if effective_plan.risk == plan.risk:
+        console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
+    else:
+        console.print(
+            Panel.fit(
+                f"Intent: {plan.intent}\nRisk(router): {plan.risk}\nRisk(effective): {effective_plan.risk}",
+                title="Plano",
+            )
+        )
 
     if not require_approval(
-        plan,
+        effective_plan,
         enabled=settings.hitl_enabled,
         min_risk=settings.hitl_min_risk,
         require_token=settings.hitl_require_token,
@@ -129,3 +146,45 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
     else:
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
+
+
+def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
+    """Calcula o risco efetivo (router + risco intrínseco das tools).
+
+    Motivação:
+    - O router/LLM pode subestimar risco.
+    - Tools têm um risco intrínseco declarado no registry.
+
+    Política:
+    - Risco efetivo = max(router_risk, max(tool_risk)).
+    - Tool desconhecida => CRITICAL (fail closed).
+    """
+
+    def rank(r: RiskLevel) -> int:
+        return {
+            RiskLevel.LOW: 0,
+            RiskLevel.MEDIUM: 1,
+            RiskLevel.HIGH: 2,
+            RiskLevel.CRITICAL: 3,
+        }.get(r, 3)
+
+    def parse_tool_risk(risk_str: str) -> RiskLevel:
+        raw = (risk_str or "LOW").strip().upper()
+        try:
+            return RiskLevel(raw)
+        except Exception:
+            return RiskLevel.LOW
+
+    current = plan.risk
+
+    for call in plan.tool_calls:
+        try:
+            spec = registry.get(call.tool_name)
+            tool_risk = parse_tool_risk(getattr(spec, "risk", "LOW"))
+        except Exception:
+            tool_risk = RiskLevel.CRITICAL
+
+        if rank(tool_risk) > rank(current):
+            current = tool_risk
+
+    return current
