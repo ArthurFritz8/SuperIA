@@ -77,7 +77,12 @@ class Settings:
             os.getenv("OMNI_HITL_REQUIRE_TOKEN", "false").strip().lower() == "true"
         )
 
-        hitl_min_risk_raw = (os.getenv("OMNI_HITL_MIN_RISK", "CRITICAL") or "CRITICAL").strip().upper()
+        hitl_min_risk_env = os.getenv("OMNI_HITL_MIN_RISK")
+        if hitl_min_risk_env is None or not hitl_min_risk_env.strip():
+            # Default seguro: se LLM está ativo, exigimos aprovação a partir de HIGH.
+            hitl_min_risk_raw = "HIGH" if router_mode == "llm" else "CRITICAL"
+        else:
+            hitl_min_risk_raw = hitl_min_risk_env.strip().upper()
         try:
             hitl_min_risk = RiskLevel(hitl_min_risk_raw)
         except Exception:
