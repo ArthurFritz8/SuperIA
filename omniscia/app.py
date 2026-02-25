@@ -20,6 +20,22 @@ from omniscia.core.logging import configure_logging
 app = typer.Typer(add_completion=False, help="Omnisciência — assistente autônomo modular")
 
 
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context) -> None:
+    """Comportamento default.
+
+    Rationale:
+    - Queremos que `python -m omniscia.app` já inicie o assistente (MVP simples).
+    - Ao mesmo tempo, queremos um CLI extensível com subcomandos (ex: `memory`, `web`).
+
+    Implementação:
+    - Se nenhum subcomando for chamado, executamos `run()`.
+    """
+
+    if ctx.invoked_subcommand is None:
+        run()
+
+
 @app.command()
 def run() -> None:
     """Inicia o loop principal do assistente."""
