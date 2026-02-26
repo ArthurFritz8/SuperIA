@@ -80,6 +80,7 @@ def route(settings: Settings, user_message: str) -> Plan:
         "web.get_page_text",
         "win.focus_window",
         "discord.send_message",
+        "jgrasp.create_java_program",
     }
     if heuristic.intent in deterministic_intents:
         return heuristic
@@ -233,6 +234,29 @@ def _route_heuristic(user_message: str) -> Plan:
             risk=RiskLevel.HIGH,
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
+
+    # Regra: criar um programa no jGRASP (cria arquivo Java no workspace e abre no jGRASP)
+    if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
+        if re.search(r"\b(programa|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
+            return Plan(
+                intent="jgrasp.create_java_program",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="os.open_app", args={"app": "jgrasp"}),
+                    ToolCall(
+                        tool_name="jgrasp.create_java_program",
+                        args={
+                            "path": "scratch/HelloWorld.java",
+                            "class_name": "HelloWorld",
+                            "message": "Olá, mundo!",
+                            "open_in_jgrasp": True,
+                            "settle_ms": 900,
+                        },
+                    ),
+                ],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou criar um programa Java simples no jGRASP (requer aprovação).",
+            )
 
     # Regra: enviar mensagem no Discord
     # Exemplos:
@@ -687,6 +711,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- os.open_app -> {app} (allowlist configurável via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON; exemplos: calculator, notepad, paint, snippingtool, discord)\n"
         "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows; retorna rect)\n"
         "- discord.send_message -> {to, message, settle_ms?} (CRITICAL; requer Discord em foco)\n"
+        "- jgrasp.create_java_program -> {path?, class_name?, message?, open_in_jgrasp?, settle_ms?} (HIGH; cria .java no workspace e abre no jGRASP)\n"
         "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"

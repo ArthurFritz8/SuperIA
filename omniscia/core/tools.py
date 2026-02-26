@@ -233,6 +233,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("Discord tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools específicas de apps (ex: jGRASP via GUI)
+    try:
+        from omniscia.modules.apps.jgrasp_gui import register_jgrasp_tools
+
+        register_jgrasp_tools(registry)
+    except Exception:
+        logger.info("jGRASP tools indisponíveis (erro ao importar/registrar).")
+
     # Tools Windows (janelas)
     try:
         from omniscia.modules.os_control.win_windows_tools import register_windows_window_tools
