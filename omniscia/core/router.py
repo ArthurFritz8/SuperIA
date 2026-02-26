@@ -48,6 +48,15 @@ def route(settings: Settings, user_message: str) -> Plan:
         msg = user_message.strip()
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
 
+    # Fast-path: common desktop opens should not go through LLM.
+    # This both improves UX and avoids blocked dev.exec hallucinations.
+    norm = _normalize(user_message)
+    if re.search(r"\b(abrir|abra|abre|open)\b", norm) and re.search(
+        r"\b(youtube|explorador|explorer|gerenciador de arquivos|calculadora|calculator|calc)\b",
+        norm,
+    ):
+        return _route_heuristic(user_message)
+
     if settings.router_mode == "llm":
         plan = _route_with_llm(settings, user_message)
         if plan is not None:
@@ -93,6 +102,18 @@ def _route_heuristic(user_message: str) -> Plan:
             ],
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri o YouTube no seu navegador.",
+        )
+
+    # Regra: abrir calculadora do Windows
+    if re.search(r"\b(calculadora|calculator|calc)\b", norm) and re.search(
+        r"\b(abrir|abra|abre|open)\b", norm
+    ):
+        return Plan(
+            intent="os.open_app",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "calculator"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, abri a Calculadora do Windows.",
         )
 
     # Regra: OCR
@@ -406,6 +427,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- write_file -> {path, content}\n"
         "- os.open_url -> {url} (apenas http/https)\n"
         "- os.open_explorer -> {path?} (path relativo; default '.')\n"
+        "- os.open_app -> {app} (allowlist: calculator)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
         "- web.screenshot -> {url, path?}\n"
@@ -418,7 +440,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- gui.move_mouse -> {x, y}\n"
         "- gui.click -> {x, y} (CRITICAL)\n"
         "- gui.type_text -> {text} (CRITICAL)\n"
-        "IMPORTANTE: Para abrir sites/apps/pastas, use os.open_url/os.open_explorer (NÃO use dev.exec).\n"
+        "IMPORTANTE: Para abrir sites/apps/pastas, use os.open_url/os.open_explorer/os.open_app (NÃO use dev.exec).\n"
         "- dev.exec -> {command, timeout_s}\n"
         "- dev.run_python -> {code, timeout_s}\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"

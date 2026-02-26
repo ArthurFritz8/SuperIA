@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import sys
 import webbrowser
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +39,21 @@ def register_open_tools(registry: ToolRegistry) -> None:
             fn=_os_open_explorer,
         )
     )
+
+    registry.register(
+        ToolSpec(
+            name="os.open_app",
+            description="Abre um app allowlisted no sistema (ex: calculator)",
+            risk="MEDIUM",
+            fn=_os_open_app,
+        )
+    )
+
+
+_ALLOW_APPS = {
+    # key -> windows executable
+    "calculator": "calc.exe",
+}
 
 
 def _safe_rel_path(raw: str) -> Path:
@@ -104,5 +120,30 @@ def _os_open_explorer(args: dict[str, Any]) -> ToolResult:
         subprocess.Popen(["xdg-open", str(target)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
         return ToolResult(status="ok", output=f"opened file manager at {target}")
 
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _os_open_app(args: dict[str, Any]) -> ToolResult:
+    """Open a small set of allowlisted apps.
+
+    This avoids using dev.exec for common desktop actions.
+    """
+
+    app = str(args.get("app", "")).strip().lower()
+    if not app:
+        return ToolResult(status="error", error="app vazio")
+
+    if app not in _ALLOW_APPS:
+        allowed = ", ".join(sorted(_ALLOW_APPS.keys()))
+        return ToolResult(status="error", error=f"app não permitido. allowlist: {allowed}")
+
+    if not sys.platform.startswith("win"):
+        return ToolResult(status="error", error="os.open_app (MVP) suporta apenas Windows")
+
+    try:
+        exe = _ALLOW_APPS[app]
+        subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
+        return ToolResult(status="ok", output=f"opened app {app}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))
