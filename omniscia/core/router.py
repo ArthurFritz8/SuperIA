@@ -564,7 +564,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- write_file -> {path, content}\n"
         "- os.open_url -> {url} (apenas http/https)\n"
         "- os.open_explorer -> {path?} (path relativo; default '.')\n"
-        "- os.open_app -> {app} (allowlist: calculator, notepad, paint, snippingtool, discord)\n"
+        "- os.open_app -> {app} (allowlist configurável via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON; exemplos: calculator, notepad, paint, snippingtool, discord)\n"
         "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"

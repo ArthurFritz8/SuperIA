@@ -221,7 +221,7 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     try:
         from omniscia.modules.os_control.openers import register_open_tools
 
-        register_open_tools(registry)
+        register_open_tools(registry, settings=settings)
     except Exception:
         logger.info("Open tools indisponíveis (erro ao importar/registrar).")
 

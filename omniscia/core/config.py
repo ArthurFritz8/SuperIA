@@ -55,6 +55,12 @@ class Settings:
     # No Windows, às vezes o tesseract.exe não está no PATH.
     tesseract_cmd: str | None = None
 
+    # OS openers
+    # Allowlist extra (JSON mapping app->target) para `os.open_app`.
+    # - target pode ser: "calc.exe", "C:/Caminho/App.exe", ou "discord://".
+    open_apps_file: str | None = None
+    open_apps_json: str | None = None
+
     # Logs
     log_level: str = "INFO"
 
@@ -95,6 +101,9 @@ class Settings:
         )
 
         tesseract_cmd = os.getenv("OMNI_TESSERACT_CMD") or None
+
+        open_apps_file = os.getenv("OMNI_OPEN_APPS_FILE") or None
+        open_apps_json = os.getenv("OMNI_OPEN_APPS_JSON") or None
 
         llm_provider = os.getenv("OMNI_LLM_PROVIDER") or None
         llm_model = os.getenv("OMNI_LLM_MODEL") or None
@@ -152,5 +161,7 @@ class Settings:
             web_headless=web_headless,
             web_assume_https=web_assume_https,
             tesseract_cmd=tesseract_cmd,
+            open_apps_file=open_apps_file,
+            open_apps_json=open_apps_json,
             log_level=log_level,
         )

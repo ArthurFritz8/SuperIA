@@ -248,6 +248,22 @@ Exemplos de intenção:
 Para abrir apps comuns sem usar `dev.exec`, use:
 - `os.open_app` com `app` na allowlist (ex.: `calculator`, `notepad`, `paint`, `snippingtool`, `discord`).
 
+Para deixar a allowlist **enorme**, ela é configurável:
+- `OMNI_OPEN_APPS_FILE` (caminho para um JSON com mapeamento `app -> target`)
+- `OMNI_OPEN_APPS_JSON` (o JSON inline)
+
+Formato do JSON (`app -> target`):
+- `target` pode ser um executável (ex: `calc.exe`), um caminho absoluto para `.exe`/`.lnk`, ou um scheme (ex: `discord://`).
+
+Exemplo de arquivo `data/open_apps.json`:
+```json
+{
+  "discord": "discord://",
+  "chrome": "C:/Program Files/Google/Chrome/Application/chrome.exe",
+  "steam": "steam://open/main"
+}
+```
+
 Exemplos:
 - "abre a calculadora"
 - "abre o bloco de notas"
