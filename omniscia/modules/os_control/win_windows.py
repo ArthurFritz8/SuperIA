@@ -16,6 +16,60 @@ import time
 from typing import Callable
 
 
+def get_foreground_window_hwnd() -> int | None:
+    """Return current foreground window HWND (Windows only)."""
+
+    if not sys.platform.startswith("win"):
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+
+    user32 = ctypes.windll.user32
+    GetForegroundWindow = user32.GetForegroundWindow
+    GetForegroundWindow.argtypes = []
+    GetForegroundWindow.restype = wintypes.HWND
+
+    try:
+        hwnd = int(GetForegroundWindow())
+        return hwnd if hwnd else None
+    except Exception:
+        return None
+
+
+def get_foreground_window_title() -> str | None:
+    """Return the title of the foreground window (Windows only)."""
+
+    if not sys.platform.startswith("win"):
+        return None
+
+    hwnd = get_foreground_window_hwnd()
+    if not hwnd:
+        return None
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return None
+
+    user32 = ctypes.windll.user32
+    GetWindowTextW = user32.GetWindowTextW
+    GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    GetWindowTextW.restype = ctypes.c_int
+
+    try:
+        buf = ctypes.create_unicode_buffer(512)
+        GetWindowTextW(hwnd, buf, 512)
+        title = (buf.value or "").strip()
+        return title
+    except Exception:
+        return None
+
+
 def find_window_hwnd_by_title_contains(
     title_contains: str,
     *,

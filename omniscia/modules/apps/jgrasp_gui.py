@@ -24,7 +24,12 @@ from typing import Any
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
 from omniscia.modules.os_control.filesystem import _safe_abs_windows_path, _safe_rel_subpath, _win_known_folder
-from omniscia.modules.os_control.win_windows import focus_window_by_title_contains
+from omniscia.modules.os_control.win_windows import (
+    find_window_hwnd_by_title_contains,
+    focus_window_by_title_contains,
+    get_foreground_window_hwnd,
+    get_foreground_window_title,
+)
 
 
 def register_jgrasp_tools(registry: ToolRegistry) -> None:
@@ -274,6 +279,7 @@ def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error=err)
 
     # Foca o jGRASP (mesmo se estiver minimizado / em outra tela).
+    jgrasp_hwnd = find_window_hwnd_by_title_contains("jgrasp", timeout_s=2.0, visible_only=False)
     rect = focus_window_by_title_contains("jgrasp", timeout_s=3.0, visible_only=False)
     if not rect:
         # Alguns títulos aparecem como "jGRASP".
@@ -284,20 +290,51 @@ def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
     time.sleep(max(0.0, float(settle_ms) / 1000.0))
 
     # Abre o diálogo de Open.
-    pyautogui.hotkey("ctrl", "o")
-    time.sleep(0.2)
+    # Às vezes o título do diálogo não é literalmente "Open/Abrir" (Swing/JFileChooser),
+    # então validamos pelo foreground HWND/título e tentamos 2x.
+    open_keywords = [
+        "open",
+        "abrir",
+        "arquivo",
+        "file",
+        "selecionar",
+        "choose",
+        "escolher",
+    ]
 
-    # IMPORTANTE: só digite o caminho se detectarmos o diálogo Abrir/Open.
-    # Caso contrário, digitar aqui suja o editor com o path.
-    dlg = focus_window_by_title_contains("abrir", timeout_s=1.2, visible_only=True)
-    if not dlg:
-        dlg = focus_window_by_title_contains("open", timeout_s=1.2, visible_only=True)
-    if not dlg:
+    def _dialog_is_foreground() -> bool:
+        fg_hwnd = get_foreground_window_hwnd()
+        fg_title = (get_foreground_window_title() or "").strip()
+        fg_cf = fg_title.casefold()
+
+        # If foreground is not the main jGRASP window, it's very likely the dialog.
+        if jgrasp_hwnd and fg_hwnd and int(fg_hwnd) != int(jgrasp_hwnd):
+            return True
+
+        # Otherwise rely on title keywords.
+        return any(k in fg_cf for k in open_keywords)
+
+    dialog_ok = False
+    for _ in range(2):
+        pyautogui.hotkey("ctrl", "o")
+        # Give it time to appear.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            if _dialog_is_foreground():
+                dialog_ok = True
+                break
+            time.sleep(0.05)
+        if dialog_ok:
+            break
+        time.sleep(0.15)
+
+    if not dialog_ok:
         return ToolResult(
             status="error",
             error=(
-                "diálogo 'Abrir/Open' não detectado após Ctrl+O; "
-                f"arquivo já foi criado em {display_path} mas não digitei nada para não sujar o editor"
+                "diálogo de Abrir não detectado após Ctrl+O; "
+                f"arquivo foi criado em {display_path}. "
+                "Abra manualmente no jGRASP (Ctrl+O) e cole o caminho."
             ),
         )
 
