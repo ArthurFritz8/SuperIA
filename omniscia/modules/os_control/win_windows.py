@@ -42,8 +42,16 @@ def focus_window_by_title_contains(
 
     user32 = ctypes.windll.user32
 
+    # Some Python/ctypes builds don't expose wintypes.WNDENUMPROC.
+    # Define the callback type explicitly for EnumWindows.
+    WNDENUMPROC = getattr(
+        wintypes,
+        "WNDENUMPROC",
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
+    )
+
     EnumWindows = user32.EnumWindows
-    EnumWindows.argtypes = [wintypes.WNDENUMPROC, wintypes.LPARAM]
+    EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
     EnumWindows.restype = wintypes.BOOL
 
     GetWindowTextW = user32.GetWindowTextW
@@ -80,7 +88,7 @@ def focus_window_by_title_contains(
     best_title: str = ""
     needle_cf = needle.casefold()
 
-    @wintypes.WNDENUMPROC
+    @WNDENUMPROC
     def _enum_proc(hwnd, lparam):  # noqa: ANN001
         nonlocal found_hwnd, best_title
         try:

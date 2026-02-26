@@ -71,7 +71,7 @@ def _discord_send_message(args: dict[str, Any]) -> ToolResult:
     if pyautogui is None:
         return ToolResult(status="error", error=err)
 
-    def _attempt() -> tuple[int | None, int | None]:
+    def _attempt() -> None:
         # Pequena espera para dar tempo do app focar.
         time.sleep(max(0.0, float(settle_ms) / 1000.0))
 
@@ -104,8 +104,6 @@ def _discord_send_message(args: dict[str, Any]) -> ToolResult:
         time.sleep(0.25)
         pyautogui.press("enter")
 
-        return x_win, y_win
-
         # Espera a conversa abrir e a UI estabilizar.
         time.sleep(0.7)
 
@@ -124,23 +122,14 @@ def _discord_send_message(args: dict[str, Any]) -> ToolResult:
         pyautogui.press("enter")
 
     try:
-        x_win, y_win = _attempt()
-        for _ in range(retries):
-            # Repetir apenas o envio (às vezes o foco demora).
-            time.sleep(0.25)
-            if x_win is None or y_win is None:
-                w, h = pyautogui.size()
-                x2 = int(w * 0.50)
-                y2 = int(h * 0.93)
-            else:
-                x2 = int(x_win)
-                y2 = int(y_win)
-
-            pyautogui.click(x=x2, y=y2, button="left")
-            time.sleep(0.05)
-            pyautogui.write(message, interval=0.01)
-            time.sleep(0.05)
-            pyautogui.press("enter")
+        for attempt_i in range(retries + 1):
+            try:
+                _attempt()
+                break
+            except Exception:
+                if attempt_i >= retries:
+                    raise
+                time.sleep(0.35)
 
         return ToolResult(status="ok", output=f"sent message to '{to}' ({len(message)} chars)")
     except Exception as exc:  # noqa: BLE001
