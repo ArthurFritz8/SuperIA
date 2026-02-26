@@ -54,6 +54,18 @@ def register_ocr_tools(registry: ToolRegistry, settings: Settings) -> None:
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="screen.click_text",
+            description=(
+                "Procura um texto via OCR e clica no melhor match (x/y/w/h). "
+                "Requer pyautogui + tesseract."
+            ),
+            risk="HIGH",
+            fn=lambda args: _screen_click_text(args, settings=settings),
+        )
+    )
+
 
 def _configure_tesseract(cfg: OcrConfig) -> None:
     import pytesseract
@@ -231,6 +243,87 @@ def _screen_find_text(args: dict[str, Any], *, settings: Settings) -> ToolResult
             status="error",
             error=(
                 "Tesseract não encontrado. Instale o Tesseract no Windows e/ou configure OMNI_TESSERACT_CMD."
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _require_pyautogui():
+    try:
+        import pyautogui
+
+        pyautogui.FAILSAFE = True
+        pyautogui.PAUSE = 0.05
+        return pyautogui, None
+    except Exception as exc:  # noqa: BLE001
+        return None, f"pyautogui indisponível: {exc}"
+
+
+def _screen_click_text(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    """Find text via OCR and click the best match.
+
+    Args:
+    - query: texto a procurar (obrigatório)
+    - path/image_path: PNG relativo (opcional). Se ausente, usa screenshot atual.
+    - lang: idioma (default por+eng)
+    - min_conf: default 60
+
+    Note:
+    - Esta tool tem side-effect (clique), então deve passar pelo HITL.
+    """
+
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="query vazio")
+
+    pyautogui, err = _require_pyautogui()
+    if pyautogui is None:
+        return ToolResult(status="error", error=err)
+
+    # Reuse find_text logic and then click center of best match.
+    min_conf = int(args.get("min_conf", 60) or 60)
+
+    res = _screen_find_text(
+        {
+            "query": query,
+            "path": args.get("path"),
+            "image_path": args.get("image_path"),
+            "lang": args.get("lang", "por+eng"),
+            "max_results": 5,
+            "min_conf": min_conf,
+        },
+        settings=settings,
+    )
+    if res.status != "ok" or not res.output:
+        return ToolResult(status="error", error=res.error or "falha no OCR")
+
+    try:
+        payload = json.loads(res.output)
+        matches = payload.get("matches") or []
+        if not matches:
+            return ToolResult(status="error", error="nenhum match encontrado")
+
+        best = matches[0]
+        x = int(best.get("x"))
+        y = int(best.get("y"))
+        w = int(best.get("w"))
+        h = int(best.get("h"))
+        if w <= 0 or h <= 0:
+            return ToolResult(status="error", error="match inválido (w/h)")
+
+        cx = x + (w // 2)
+        cy = y + (h // 2)
+        screen_w, screen_h = pyautogui.size()
+        if cx < 0 or cy < 0 or cx >= int(screen_w) or cy >= int(screen_h):
+            return ToolResult(status="error", error="centro fora da tela")
+
+        pyautogui.click(x=cx, y=cy, button="left")
+        return ToolResult(
+            status="ok",
+            output=json.dumps(
+                {"clicked": {"x": cx, "y": cy}, "match": best},
+                ensure_ascii=False,
             ),
         )
     except Exception as exc:  # noqa: BLE001

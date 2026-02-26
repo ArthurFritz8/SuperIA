@@ -152,6 +152,12 @@ Obs: por padrão, URLs precisam incluir `http://` ou `https://`. Opcionalmente, 
 
 - `python -m omniscia.app`
 
+### Self-test (offline)
+
+Para validar rapidamente instalação/roteamento/tools (sem gastar LLM):
+
+- `python -m omniscia selftest`
+
 ### Windows (atalhos)
 
 - Rodar por duplo-clique (abre um CMD e executa):
@@ -224,6 +230,14 @@ Tool avançada (para automação guiada por tela):
 
 Helper (mais direto):
 - `gui.click_box_center` recebe `x/y/w/h` e clica no centro da caixa (ideal junto de `screen.find_text`).
+
+Tool end-to-end (com clique):
+- `screen.click_text` procura `query` via OCR e clica no melhor match (requer Tesseract + PyAutoGUI; passa pelo HITL).
+
+## Dev (lint/test)
+
+Dependências de desenvolvimento (opcionais):
+- `pip install -r requirements-dev.txt`
 
 Exemplos de intenção:
 - "ache o texto 'OK' na tela" (usa `screen.find_text`)

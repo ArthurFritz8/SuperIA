@@ -17,6 +17,8 @@ from omniscia.core.brain import run_brain_loop
 from omniscia.core.config import Settings
 from omniscia.core.logging import configure_logging
 
+from omniscia.core.selftest import run_selftest
+
 app = typer.Typer(add_completion=False, help="Omnisciência — assistente autônomo modular")
 
 
@@ -43,6 +45,19 @@ def run() -> None:
     settings = Settings.load()
     configure_logging(settings)
     run_brain_loop(settings)
+
+
+@app.command()
+def selftest() -> None:
+    """Roda um conjunto curto de testes offline (sem gastar LLM).
+
+    Útil para validar instalação, tools básicas e roteamento determinístico.
+    """
+
+    ok, report = run_selftest()
+    typer.echo(report)
+    if not ok:
+        raise typer.Exit(code=1)
 
 
 def main() -> None:

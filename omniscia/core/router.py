@@ -88,7 +88,6 @@ def route(settings: Settings, user_message: str) -> Plan:
 
 def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
-    lower = msg.lower()
     norm = _normalize(msg)
 
     # Regra: screenshot
@@ -500,6 +499,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- screen.screenshot -> {}\n"
         "- screen.ocr -> {path?}\n"
         "- screen.find_text -> {query, path?, max_results?, min_conf?} (retorna caixas x/y/w/h)\n"
+        "- screen.click_text -> {query, path?, min_conf?} (CRITICAL)\n"
         "- gui.get_mouse -> {}\n"
         "- gui.move_mouse -> {x, y}\n"
         "- gui.click -> {x, y} (CRITICAL)\n"

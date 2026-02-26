@@ -65,14 +65,14 @@ def _record_wav_bytes(*, record_seconds: float, sample_rate: int) -> bytes:
     """
 
     try:
-        import sounddevice as sd
+        import sounddevice as sd  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "Dependência ausente: sounddevice. Instale com `pip install sounddevice soundfile`."
         ) from exc
 
     try:
-        import soundfile as sf
+        import soundfile as sf  # type: ignore[import-not-found]
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             "Dependência ausente: soundfile. Instale com `pip install sounddevice soundfile`."
@@ -107,11 +107,18 @@ def _whisper_transcribe(*, api_key: str, model: str, wav_bytes: bytes) -> str:
         "Authorization": f"Bearer {api_key}",
     }
 
-    with httpx.Client(timeout=60.0) as client:
-        resp = client.post(url, headers=headers, data=data, files=files)
+    try:
+        with httpx.Client(timeout=30.0) as client:
+            resp = client.post(url, headers=headers, data=data, files=files)
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"Whisper API network error: {exc}") from exc
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"Whisper API error {resp.status_code}: {resp.text}")
+        # Evita cuspir payload gigante no terminal (custo/tokens).
+        body = (resp.text or "").strip()
+        if len(body) > 800:
+            body = body[:800] + "... [truncado]"
+        raise RuntimeError(f"Whisper API error {resp.status_code}: {body}")
 
     payload = resp.json()
     text = str(payload.get("text", "")).strip()
