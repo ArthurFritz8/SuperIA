@@ -218,6 +218,23 @@ Para ler texto da tela localmente (sem enviar imagem para a internet):
 Comando heurístico:
 - `ocr` (ou "ler tela")
 
+Tool avançada (para automação guiada por tela):
+- `screen.find_text` (via router LLM) procura um texto e devolve caixas `x/y/w/h`.
+  Você pode usar isso para achar um botão/label na tela e então chamar `gui.click` com as coordenadas.
+
+Exemplos de intenção:
+- "ache o texto 'OK' na tela" (usa `screen.find_text`)
+- "clique no botão 'OK'" (tipicamente: `screen.find_text` → `gui.click`, com HITL)
+
+## Abrir apps allowlisted (Windows)
+
+Para abrir apps comuns sem usar `dev.exec`, use:
+- `os.open_app` com `app` na allowlist (ex.: `calculator`, `notepad`, `paint`, `snippingtool`).
+
+Exemplos:
+- "abre a calculadora"
+- "abre o bloco de notas"
+
 ## DevAgent (Programador Interno) — MVP
 
 Comandos heurísticos:

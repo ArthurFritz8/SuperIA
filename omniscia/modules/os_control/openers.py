@@ -53,6 +53,22 @@ def register_open_tools(registry: ToolRegistry) -> None:
 _ALLOW_APPS = {
     # key -> windows executable
     "calculator": "calc.exe",
+    "notepad": "notepad.exe",
+    "paint": "mspaint.exe",
+    "snippingtool": "snippingtool.exe",
+}
+
+
+_APP_ALIASES = {
+    # PT-BR / common forms
+    "calculadora": "calculator",
+    "calc": "calculator",
+    "bloco de notas": "notepad",
+    "bloconotas": "notepad",
+    "notas": "notepad",
+    "paintbrush": "paint",
+    "ferramenta de captura": "snippingtool",
+    "captura": "snippingtool",
 }
 
 
@@ -130,7 +146,8 @@ def _os_open_app(args: dict[str, Any]) -> ToolResult:
     This avoids using dev.exec for common desktop actions.
     """
 
-    app = str(args.get("app", "")).strip().lower()
+    app_raw = str(args.get("app", "")).strip().lower()
+    app = _APP_ALIASES.get(app_raw, app_raw)
     if not app:
         return ToolResult(status="error", error="app vazio")
 
