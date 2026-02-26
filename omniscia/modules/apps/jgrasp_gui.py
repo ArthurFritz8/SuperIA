@@ -20,6 +20,7 @@ import time
 from pathlib import Path
 import re
 from typing import Any
+import ctypes
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
@@ -47,6 +48,18 @@ def register_jgrasp_tools(registry: ToolRegistry) -> None:
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="jgrasp.write_code",
+            description=(
+                "Foca o jGRASP e cola/escreve código no editor atual (não cria arquivo). "
+                "Args: code (obrigatório), settle_ms?, select_all?"
+            ),
+            risk="HIGH",
+            fn=_jgrasp_write_code,
+        )
+    )
+
 
 def _require_pyautogui():
     try:
@@ -57,6 +70,78 @@ def _require_pyautogui():
         return pyautogui, None
     except Exception as exc:  # noqa: BLE001
         return None, f"pyautogui indisponível: {exc}"
+
+
+def _set_clipboard_text_windows(text: str) -> None:
+    """Set Windows clipboard text (Unicode)."""
+
+    if not sys.platform.startswith("win"):
+        raise RuntimeError("clipboard só é suportado no Windows")
+
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+
+    OpenClipboard = user32.OpenClipboard
+    OpenClipboard.argtypes = [ctypes.c_void_p]
+    OpenClipboard.restype = ctypes.c_bool
+
+    CloseClipboard = user32.CloseClipboard
+    CloseClipboard.argtypes = []
+    CloseClipboard.restype = ctypes.c_bool
+
+    EmptyClipboard = user32.EmptyClipboard
+    EmptyClipboard.argtypes = []
+    EmptyClipboard.restype = ctypes.c_bool
+
+    SetClipboardData = user32.SetClipboardData
+    SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+    SetClipboardData.restype = ctypes.c_void_p
+
+    GlobalAlloc = kernel32.GlobalAlloc
+    GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+    GlobalAlloc.restype = ctypes.c_void_p
+
+    GlobalLock = kernel32.GlobalLock
+    GlobalLock.argtypes = [ctypes.c_void_p]
+    GlobalLock.restype = ctypes.c_void_p
+
+    GlobalUnlock = kernel32.GlobalUnlock
+    GlobalUnlock.argtypes = [ctypes.c_void_p]
+    GlobalUnlock.restype = ctypes.c_bool
+
+    GMEM_MOVEABLE = 0x0002
+    CF_UNICODETEXT = 13
+
+    data = (text or "")
+    if not data.endswith("\x00"):
+        data += "\x00"
+    buf = data.encode("utf-16le")
+
+    if not OpenClipboard(None):
+        raise RuntimeError("falha ao abrir clipboard")
+
+    try:
+        if not EmptyClipboard():
+            raise RuntimeError("falha ao limpar clipboard")
+
+        hglob = GlobalAlloc(GMEM_MOVEABLE, len(buf))
+        if not hglob:
+            raise RuntimeError("falha ao alocar memória do clipboard")
+
+        locked = GlobalLock(hglob)
+        if not locked:
+            raise RuntimeError("falha ao travar memória do clipboard")
+
+        try:
+            ctypes.memmove(locked, buf, len(buf))
+        finally:
+            GlobalUnlock(hglob)
+
+        if not SetClipboardData(CF_UNICODETEXT, hglob):
+            raise RuntimeError("falha ao setar dados no clipboard")
+        # Ownership transferred to the system on success.
+    finally:
+        CloseClipboard()
 
 
 def _safe_rel_java_path(path: str) -> Path:
@@ -347,3 +432,57 @@ def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
     time.sleep(0.45)
 
     return ToolResult(status="ok", output=f"created and opened {display_path} in jGRASP")
+
+
+def _jgrasp_write_code(args: dict[str, Any]) -> ToolResult:
+    """Paste code into the current jGRASP editor (no file creation)."""
+
+    if not sys.platform.startswith("win"):
+        return ToolResult(status="error", error="jgrasp.write_code suporta apenas Windows")
+
+    code = str(args.get("code", "") or "")
+    if not code.strip():
+        return ToolResult(status="error", error="code vazio")
+
+    settle_ms = int(args.get("settle_ms", 700) or 700)
+    select_all = bool(args.get("select_all", True))
+
+    pyautogui, err = _require_pyautogui()
+    if pyautogui is None:
+        return ToolResult(status="error", error=err)
+
+    rect = focus_window_by_title_contains("jgrasp", timeout_s=3.0, visible_only=False)
+    if not rect:
+        rect = focus_window_by_title_contains("jgrasp", timeout_s=1.0, visible_only=False)
+    if not rect:
+        return ToolResult(status="error", error="janela do jGRASP não encontrada (abra o jGRASP primeiro)")
+
+    time.sleep(max(0.0, float(settle_ms) / 1000.0))
+
+    # Clique em uma área típica do editor (lado direito) para garantir foco de teclado.
+    left = rect["left"]
+    top = rect["top"]
+    width = max(10, rect["right"] - rect["left"])
+    height = max(10, rect["bottom"] - rect["top"])
+    x = int(left + width * 0.72)
+    y = int(top + height * 0.22)
+    pyautogui.click(x, y)
+    time.sleep(0.05)
+
+    if select_all:
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.03)
+
+    try:
+        _set_clipboard_text_windows(code)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.15)
+        return ToolResult(status="ok", output="wrote code into jGRASP editor")
+    except Exception as exc:  # noqa: BLE001
+        # Fallback: slow type
+        try:
+            pyautogui.write(code, interval=0.0)
+            time.sleep(0.1)
+            return ToolResult(status="ok", output="wrote code into jGRASP editor")
+        except Exception:
+            return ToolResult(status="error", error=f"falha ao colar/escrever código: {exc}")

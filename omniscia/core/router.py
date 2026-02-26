@@ -297,6 +297,69 @@ def _route_heuristic(user_message: str) -> Plan:
                 final_response="Ok — vou criar um código Java de matriz no jGRASP (requer aprovação).",
             )
 
+    # Regra: código de matemática no jGRASP (sem criar arquivo; cola no editor)
+    if "jgrasp" in norm and re.search(r"\b(matem[aá]tica|matematica|math)\b", norm):
+        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
+            code = (
+                "import java.util.Scanner;\n\n"
+                "public class MatematicaDemo {\n"
+                "    static long fatorial(int n) {\n"
+                "        long r = 1;\n"
+                "        for (int i = 2; i <= n; i++) r *= i;\n"
+                "        return r;\n"
+                "    }\n\n"
+                "    static boolean ehPrimo(int n) {\n"
+                "        if (n < 2) return false;\n"
+                "        if (n % 2 == 0) return n == 2;\n"
+                "        for (int d = 3; d * d <= n; d += 2) {\n"
+                "            if (n % d == 0) return false;\n"
+                "        }\n"
+                "        return true;\n"
+                "    }\n\n"
+                "    static int mdc(int a, int b) {\n"
+                "        a = Math.abs(a);\n"
+                "        b = Math.abs(b);\n"
+                "        while (b != 0) {\n"
+                "            int t = a % b;\n"
+                "            a = b;\n"
+                "            b = t;\n"
+                "        }\n"
+                "        return a;\n"
+                "    }\n\n"
+                "    public static void main(String[] args) {\n"
+                "        Scanner sc = new Scanner(System.in);\n"
+                "        System.out.print(\"Digite um inteiro n (0..20): \");\n"
+                "        int n = sc.nextInt();\n"
+                "        if (n < 0) n = 0;\n"
+                "        if (n > 20) n = 20;\n"
+                "        System.out.println(\"fatorial(n) = \" + fatorial(n));\n"
+                "        System.out.println(\"n é primo? \" + (ehPrimo(n) ? \"sim\" : \"não\"));\n\n"
+                "        System.out.print(\"Digite a e b para MDC: \");\n"
+                "        int a = sc.nextInt();\n"
+                "        int b = sc.nextInt();\n"
+                "        System.out.println(\"mdc(a,b) = \" + mdc(a, b));\n"
+                "        sc.close();\n"
+                "    }\n"
+                "}\n"
+            )
+
+            return Plan(
+                intent="jgrasp.write_code",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="jgrasp.write_code",
+                        args={
+                            "code": code,
+                            "select_all": True,
+                            "settle_ms": 700,
+                        },
+                    )
+                ],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou escrever o código no editor do jGRASP (requer aprovação).",
+            )
+
     # Regra: criar um programa/projeto no jGRASP (cria arquivo Java e abre no jGRASP)
     if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
         if re.search(r"\b(programa|projeto|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
@@ -786,6 +849,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows; retorna rect)\n"
         "- discord.send_message -> {to, message, settle_ms?} (CRITICAL; requer Discord em foco)\n"
         "- jgrasp.create_java_program -> {path?, class_name?, message?, code?, open_in_jgrasp?, settle_ms?} (HIGH; cria .java e abre no jGRASP; use code para conteúdo completo)\n"
+        "- jgrasp.write_code -> {code, settle_ms?, select_all?} (HIGH; cola/escreve no editor do jGRASP; não cria arquivo)\n"
         "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
