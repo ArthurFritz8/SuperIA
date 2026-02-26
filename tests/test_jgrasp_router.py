@@ -9,6 +9,7 @@ def test_router_jgrasp_create_program_is_high_and_deterministic():
     assert plan.intent == "jgrasp.create_java_program"
     assert plan.risk == RiskLevel.HIGH
     assert [c.tool_name for c in plan.tool_calls] == ["os.open_app", "jgrasp.create_java_program"]
+    assert str(plan.tool_calls[1].args.get("path", "")) == "scratch/HelloWorld.java"
 
 
 def test_llm_mode_still_prefers_deterministic_jgrasp(monkeypatch):

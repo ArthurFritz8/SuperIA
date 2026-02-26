@@ -22,7 +22,7 @@ from typing import Any
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
-from omniscia.modules.os_control.filesystem import _safe_rel_subpath, _win_known_folder
+from omniscia.modules.os_control.filesystem import _safe_abs_windows_path, _safe_rel_subpath, _win_known_folder
 from omniscia.modules.os_control.win_windows import focus_window_by_title_contains
 
 
@@ -33,7 +33,7 @@ def register_jgrasp_tools(registry: ToolRegistry) -> None:
             description=(
                 "Cria um arquivo .java funcional e abre no jGRASP (Ctrl+O). "
                 "Por padrão, cria no workspace (path relativo). Também aceita path com prefixo "
-                "desktop:/..., documents:/..., downloads:/... ou path absoluto dentro dessas pastas. "
+                "desktop:/..., documents:/..., downloads:/... ou path absoluto (com guardrails). "
                 "Args: path?, class_name?, message?, open_in_jgrasp?, settle_ms?"
             ),
             risk="HIGH",
@@ -66,20 +66,16 @@ def _safe_rel_java_path(path: str) -> Path:
     return Path(p)
 
 
-def _is_within(child: Path, parent: Path) -> bool:
-    try:
-        child.resolve().relative_to(parent.resolve())
-        return True
-    except Exception:  # noqa: BLE001
-        return False
-
-
 def _safe_abs_windows_java_target(raw: str, class_name: str) -> Path:
-    """Resolve a target path for .java under safe known folders (Desktop/Documents/Downloads).
+    """Resolve a safe target path for .java using Windows absolute paths.
 
     Accepts:
     - Absolute directory path (creates <ClassName>.java inside)
     - Absolute .java file path
+
+    Guardrails:
+    - Blocks system directories (Windows/Program Files)
+    - Blocks drive root (e.g. D:\\)
     """
 
     s = (raw or "").strip().strip('"').strip("'").replace("/", "\\")
@@ -91,32 +87,29 @@ def _safe_abs_windows_java_target(raw: str, class_name: str) -> Path:
     if any(part == ".." for part in p.parts):
         raise ValueError("path não pode conter '..'")
 
-    # Allow only inside Desktop/Documents/Downloads (and workspace cwd).
-    allowed_bases = [
-        Path.cwd().resolve(),
-        _win_known_folder("desktop").resolve(),
-        _win_known_folder("documents").resolve(),
-        _win_known_folder("downloads").resolve(),
-    ]
     resolved = p.resolve()
-    if not any(_is_within(resolved, base) for base in allowed_bases):
-        raise PermissionError("path absoluto permitido apenas dentro do workspace, Desktop, Documents ou Downloads")
 
     # If it is a directory (or looks like one), create file inside it.
     if resolved.exists() and resolved.is_dir():
         safe_cn = "".join(ch for ch in (class_name or "HelloWorld") if ch.isalnum() or ch == "_")
         if not safe_cn or safe_cn[0].isdigit():
             safe_cn = "HelloWorld"
+        # Validate the directory target itself.
+        _safe_abs_windows_path(str(resolved))
         return (resolved / f"{safe_cn}.java").resolve()
 
     # If not existing: infer directory vs file by suffix.
     if str(resolved).lower().endswith(".java"):
+        # Validate parent directory.
+        _safe_abs_windows_path(str(resolved.parent))
         return resolved
 
     # Treat as directory path even if it doesn't exist yet.
     safe_cn = "".join(ch for ch in (class_name or "HelloWorld") if ch.isalnum() or ch == "_")
     if not safe_cn or safe_cn[0].isdigit():
         safe_cn = "HelloWorld"
+    # Validate the (possibly non-existent) directory path.
+    _safe_abs_windows_path(str(resolved))
     return (resolved / f"{safe_cn}.java").resolve()
 
 
