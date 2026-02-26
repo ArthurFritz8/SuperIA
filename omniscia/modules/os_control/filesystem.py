@@ -241,6 +241,11 @@ def _safe_rel_subpath(raw: str) -> Path:
     s = (raw or "").strip().strip('"').strip("'").replace("\\", "/")
     if not s:
         raise ValueError("name vazio")
+    # Permite formatos como "desktop:/Pasta/Arquivo" (strip da barra inicial).
+    # Continua bloqueando roots/UNC, drive letters e traversal.
+    s = s.lstrip("/")
+    if not s:
+        raise ValueError("name vazio")
     if s.startswith("/") or ":" in s:
         raise ValueError("name deve ser relativo")
     if s.startswith("~") or "/~" in s or "~" in s.split("/"):
