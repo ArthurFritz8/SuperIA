@@ -220,10 +220,16 @@ def _route_heuristic(user_message: str) -> Plan:
 
     # Regra: fechar Discord (gracioso, sem taskkill)
     if "discord" in norm and re.search(r"\b(fechar|feche|fecha|close|encerrar)\b", norm):
+        in_background = bool(re.search(r"\b(segundo plano|background|bandeja|tray|minimizad[oa])\b", norm))
         return Plan(
             intent="os.close_app",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="os.close_app", args={"app": "discord"})],
+            tool_calls=[
+                ToolCall(
+                    tool_name="os.close_app",
+                    args={"app": "discord", "visible_only": (not in_background)},
+                )
+            ],
             risk=RiskLevel.HIGH,
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )

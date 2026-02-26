@@ -42,6 +42,15 @@ def test_router_close_discord_is_high():
     assert [c.tool_name for c in plan.tool_calls] == ["os.close_app"]
 
 
+def test_router_close_discord_in_background_sets_visible_only_false():
+    settings = Settings(router_mode="heuristic")
+    plan = route(settings, "feche o discord no segundo plano")
+    assert plan.intent == "os.close_app"
+    assert plan.risk == RiskLevel.HIGH
+    assert plan.tool_calls[0].tool_name == "os.close_app"
+    assert plan.tool_calls[0].args.get("visible_only") is False
+
+
 def test_llm_mode_still_prefers_deterministic_close_app(monkeypatch):
     import omniscia.core.router as router_mod
 

@@ -626,7 +626,15 @@ def _os_close_app(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error="informe app ou title_contains")
 
     ok = close_window_by_title_contains(title_contains, timeout_s=timeout_s, visible_only=visible_only)
+    if not ok and visible_only:
+        # Retry including non-visible windows (ex.: app está em segundo plano / tray).
+        ok = close_window_by_title_contains(title_contains, timeout_s=timeout_s, visible_only=False)
     if not ok:
-        return ToolResult(status="error", error="janela não encontrada para fechar")
+        return ToolResult(
+            status="error",
+            error=(
+                "janela não encontrada para fechar (talvez já esteja fechado, ou esteja rodando apenas na bandeja)"
+            ),
+        )
 
     return ToolResult(status="ok", output=f"closed app/window matching '{title_contains}'")
