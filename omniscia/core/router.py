@@ -235,9 +235,21 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
 
-    # Regra: criar um programa no jGRASP (cria arquivo Java no workspace e abre no jGRASP)
+    # Regra: criar um programa/projeto no jGRASP (cria arquivo Java e abre no jGRASP)
     if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
-        if re.search(r"\b(programa|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
+        if re.search(r"\b(programa|projeto|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
+            # Se o usuário pedir explicitamente para salvar na Área de Trabalho, use o prefixo desktop:/
+            # (a tool do jGRASP aplica guardrails e resolve com Known Folders).
+            wants_desktop = bool(
+                re.search(r"\b(área de trabalho|area de trabalho|desktop)\b", norm)
+            )
+
+            path = "scratch/HelloWorld.java"
+            class_name = "HelloWorld"
+            if wants_desktop:
+                path = "desktop:/MeuProjeto/MeuProjeto.java"
+                class_name = "MeuProjeto"
+
             return Plan(
                 intent="jgrasp.create_java_program",
                 user_message=msg,
@@ -246,8 +258,8 @@ def _route_heuristic(user_message: str) -> Plan:
                     ToolCall(
                         tool_name="jgrasp.create_java_program",
                         args={
-                            "path": "scratch/HelloWorld.java",
-                            "class_name": "HelloWorld",
+                            "path": path,
+                            "class_name": class_name,
                             "message": "Olá, mundo!",
                             "open_in_jgrasp": True,
                             "settle_ms": 900,

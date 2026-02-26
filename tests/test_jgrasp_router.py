@@ -23,3 +23,15 @@ def test_llm_mode_still_prefers_deterministic_jgrasp(monkeypatch):
     plan = route(settings, "crie um programa funcional no jgrasp")
     assert plan.intent == "jgrasp.create_java_program"
     assert plan.risk == RiskLevel.HIGH
+
+
+def test_router_jgrasp_project_on_desktop_uses_desktop_prefix():
+    settings = Settings(router_mode="heuristic")
+    plan = route(
+        settings,
+        "crie um novo projeto no jgrasp em java, pode salvar na area de trabalho mesmo",
+    )
+    assert plan.intent == "jgrasp.create_java_program"
+    assert plan.risk == RiskLevel.HIGH
+    assert [c.tool_name for c in plan.tool_calls] == ["os.open_app", "jgrasp.create_java_program"]
+    assert str(plan.tool_calls[1].args.get("path", "")).lower().startswith("desktop:/")
