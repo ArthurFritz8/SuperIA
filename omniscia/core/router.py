@@ -77,6 +77,8 @@ def route(settings: Settings, user_message: str) -> Plan:
         "gui.type_text",
         # Web read-only
         "web.get_page_text",
+            "win.focus_window",
+            "discord.send_message",
     }
     if heuristic.intent in deterministic_intents:
         return heuristic
@@ -92,6 +94,9 @@ def route(settings: Settings, user_message: str) -> Plan:
 def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
+
+    def _strip_quotes(s: str) -> str:
+        return (s or "").strip().strip('"').strip("'").strip()
 
     def _guess_folder_name(text: str) -> str | None:
         q = re.search(r"['\"]([^'\"]+)['\"]", text)
@@ -222,7 +227,7 @@ def _route_heuristic(user_message: str) -> Plan:
         flags=re.IGNORECASE,
     )
     if m:
-        to = (m.group("to") or "").strip().strip('"').strip("'")
+        to = _strip_quotes(m.group("to") or "")
         text = (m.group("text") or "").strip()
         if to and text:
             return Plan(
@@ -234,6 +239,35 @@ def _route_heuristic(user_message: str) -> Plan:
                 ],
                 risk=RiskLevel.CRITICAL,
                 final_response="Ok — vou enviar a mensagem no Discord (requer aprovação).",
+            )
+
+    # Regra: "clique no chat da Alice e mande um oi" (sem mencionar Discord explicitamente)
+    # Preferimos o fluxo via atalhos (discord.send_message) em vez de coordenadas/GUI.
+    m = re.search(
+        r"\bclique\b.*\bchat\b.*\bda\b\s*(?P<to>[^,.;:]+?)\s+e\s+\bmande\b\s+(?P<text>.+)$",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        to = _strip_quotes(m.group("to") or "")
+        text = (m.group("text") or "").strip()
+        # Remove sufixos comuns: "para ela/ele".
+        text = re.sub(r"\b(pra|para)\s+(ela|ele|ele(a)?)\b\s*$", "", text, flags=re.IGNORECASE).strip()
+        # Frases como "um oi" => "oi".
+        text_norm = _normalize(text)
+        if re.fullmatch(r"(um\s+)?oi", text_norm):
+            text = "oi"
+
+        if to and text:
+            return Plan(
+                intent="discord.send_message",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="os.open_app", args={"app": "discord"}),
+                    ToolCall(tool_name="discord.send_message", args={"to": to, "message": text, "settle_ms": 900}),
+                ],
+                risk=RiskLevel.CRITICAL,
+                final_response="Ok — vou abrir o chat e enviar a mensagem no Discord (requer aprovação).",
             )
 
     # Regra: OCR

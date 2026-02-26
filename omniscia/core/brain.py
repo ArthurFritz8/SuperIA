@@ -206,6 +206,29 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
     did = False
     note_parts: list[str] = []
 
+    def to_intish(v) -> int:
+        """Best-effort conversion for coordinates.
+
+        Accepts: int, float, numeric strings like "123", "123.0", "123,0".
+        """
+
+        if v is None:
+            raise ValueError("none")
+        if isinstance(v, bool):
+            raise ValueError("bool")
+        if isinstance(v, int):
+            return int(v)
+        if isinstance(v, float):
+            return int(round(v))
+        s = str(v).strip()
+        if not s:
+            raise ValueError("empty")
+        # Handle comma decimal separator (pt-BR) when no dot exists.
+        if "," in s and "." not in s:
+            s = s.replace(",", ".")
+        f = float(s)
+        return int(round(f))
+
     def norm_str(v) -> str:
         return str(v).strip()
 
@@ -295,7 +318,7 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
         for k in ("x", "y"):
             if k in a:
                 try:
-                    a[k] = int(str(a.get(k)))
+                    a[k] = to_intish(a.get(k))
                     did = True
                 except Exception:
                     pass
@@ -631,7 +654,18 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
                 return f"faltando {k}"
             try:
                 val = a.get(k, "")
-                n = int(str(val))
+                # Aceita int-ish (ex: 123.0) e strings numéricas.
+                if isinstance(val, bool):
+                    raise ValueError("bool")
+                if isinstance(val, int):
+                    n = int(val)
+                elif isinstance(val, float):
+                    n = int(round(val))
+                else:
+                    s = str(val).strip()
+                    if "," in s and "." not in s:
+                        s = s.replace(",", ".")
+                    n = int(round(float(s)))
             except Exception:
                 return f"{k} deve ser int"
 
