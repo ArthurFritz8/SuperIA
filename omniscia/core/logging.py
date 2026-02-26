@@ -22,4 +22,6 @@ def configure_logging(settings: Settings) -> None:
     # Silencia bibliotecas barulhentas por padrão.
     logging.getLogger("httpx").setLevel(logging.WARNING)
     # LiteLLM pode ser bem barulhento em INFO; default é WARNING.
-    logging.getLogger("litellm").setLevel(logging.INFO if level <= logging.DEBUG else logging.WARNING)
+    litellm_level = logging.INFO if level <= logging.DEBUG else logging.WARNING
+    logging.getLogger("litellm").setLevel(litellm_level)
+    logging.getLogger("LiteLLM").setLevel(litellm_level)

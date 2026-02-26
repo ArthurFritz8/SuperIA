@@ -56,6 +56,7 @@ def route(settings: Settings, user_message: str) -> Plan:
         "os.open_url",
         "os.open_explorer",
         "os.open_app",
+        "os.close_app",
         "os.scan_apps",
         "os.generate_open_apps",
         "os.mkdir",
@@ -77,8 +78,8 @@ def route(settings: Settings, user_message: str) -> Plan:
         "gui.type_text",
         # Web read-only
         "web.get_page_text",
-            "win.focus_window",
-            "discord.send_message",
+        "win.focus_window",
+        "discord.send_message",
     }
     if heuristic.intent in deterministic_intents:
         return heuristic
@@ -215,6 +216,16 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "discord"})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri o Discord.",
+        )
+
+    # Regra: fechar Discord (gracioso, sem taskkill)
+    if "discord" in norm and re.search(r"\b(fechar|feche|fecha|close|encerrar)\b", norm):
+        return Plan(
+            intent="os.close_app",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.close_app", args={"app": "discord"})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
 
     # Regra: enviar mensagem no Discord

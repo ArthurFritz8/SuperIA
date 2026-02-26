@@ -364,6 +364,29 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
             did = True
             note_parts.append("command trimmed")
 
+    if tool_name == "os.close_app":
+        if "app" in a:
+            before = a.get("app")
+            after = norm_str(before).lower().replace(" ", "").replace("_", "")
+            if before != after:
+                a["app"] = after
+                did = True
+                note_parts.append("app normalized")
+        if "title_contains" in a and a.get("title_contains") is not None:
+            before = a.get("title_contains")
+            after = norm_str(before)
+            if before != after:
+                a["title_contains"] = after
+                did = True
+                note_parts.append("title_contains trimmed")
+        if "timeout_s" in a:
+            try:
+                a["timeout_s"] = float(str(a.get("timeout_s")))
+                did = True
+                note_parts.append("timeout_s float")
+            except Exception:
+                pass
+
     note = ", ".join(note_parts) if note_parts else None
     return a, note, did
 
@@ -646,6 +669,19 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
                 return "timeout_s inválido"
             if t <= 0 or t > 300:
                 return "timeout_s fora do limite (0 < timeout_s <= 300)"
+
+    if tool_name == "os.close_app":
+        app = str(a.get("app", "") or "").strip()
+        title_contains = str(a.get("title_contains", "") or "").strip()
+        if not app and not title_contains:
+            return "informe app ou title_contains"
+        if "timeout_s" in a:
+            try:
+                t = float(str(a.get("timeout_s")))
+            except Exception:
+                return "timeout_s inválido"
+            if t <= 0 or t > 20:
+                return "timeout_s fora do limite (0 < timeout_s <= 20)"
 
     # GUI args básicos
     if tool_name in {"gui.move_mouse", "gui.click"}:

@@ -26,6 +26,7 @@ from omniscia.core.config import Settings
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
+from omniscia.modules.os_control.win_windows import close_window_by_title_contains
 
 
 def register_open_tools(registry: ToolRegistry, settings: Settings | None = None) -> None:
@@ -52,6 +53,18 @@ def register_open_tools(registry: ToolRegistry, settings: Settings | None = None
             description="Abre um app allowlisted no sistema (ex: calculator)",
             risk="MEDIUM",
             fn=lambda args: _os_open_app(args, settings=settings),
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="os.close_app",
+            description=(
+                "Fecha um app de forma graciosa (fecha a janela via Windows/WM_CLOSE). "
+                "Use app='discord' ou title_contains='Discord'."
+            ),
+            risk="HIGH",
+            fn=_os_close_app,
         )
     )
 
@@ -585,3 +598,35 @@ def _os_open_app(args: dict[str, Any], *, settings: Settings | None = None) -> T
         return ToolResult(status="ok", output=f"opened app {app}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))
+
+
+def _os_close_app(args: dict[str, Any]) -> ToolResult:
+    """Close an app window gracefully (Windows only).
+
+    Args:
+    - app: allowlist key (e.g. 'discord')
+    - title_contains: window title substring (fallback)
+    - timeout_s: seconds to search for window
+    - visible_only: only consider visible windows (default True)
+    """
+
+    if not sys.platform.startswith("win"):
+        return ToolResult(status="error", error="os.close_app (MVP) suporta apenas Windows")
+
+    app = str(args.get("app", "") or "").strip().lower()
+    title_contains = str(args.get("title_contains", "") or "").strip()
+    timeout_s = float(args.get("timeout_s", 2.5) or 2.5)
+    visible_only = bool(args.get("visible_only", True))
+
+    if not title_contains and app:
+        # default: use app key as title hint
+        title_contains = app
+
+    if not title_contains:
+        return ToolResult(status="error", error="informe app ou title_contains")
+
+    ok = close_window_by_title_contains(title_contains, timeout_s=timeout_s, visible_only=visible_only)
+    if not ok:
+        return ToolResult(status="error", error="janela não encontrada para fechar")
+
+    return ToolResult(status="ok", output=f"closed app/window matching '{title_contains}'")
