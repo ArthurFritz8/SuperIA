@@ -43,6 +43,8 @@ def _safe_rel_path(path: str) -> Path:
     p = (path or "").strip().replace("\\", "/")
     if not p:
         raise ValueError("path vazio")
+    if p.startswith("~") or "/~" in p or "~" in p.split("/"):
+        raise ValueError("path não pode usar '~' (use path relativo ao workspace)")
     if p.startswith("/") or ":" in p:
         raise ValueError("path deve ser relativo")
     if ".." in p.split("/"):

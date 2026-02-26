@@ -56,6 +56,7 @@ def route(settings: Settings, user_message: str) -> Plan:
         "os.open_url",
         "os.open_explorer",
         "os.open_app",
+        "os.mkdir",
         # Filesystem routines
         "fs.list_dir",
         "fs.read_text",
@@ -89,6 +90,28 @@ def route(settings: Settings, user_message: str) -> Plan:
 def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
+
+    def _guess_folder_name(text: str) -> str | None:
+        q = re.search(r"['\"]([^'\"]+)['\"]", text)
+        if q:
+            return q.group(1).strip()
+
+        m2 = re.search(
+            r"\b(pasta|diretorio|diret[oó]rio|folder|dir)\b\s+(?:chamada|chamado|nome)?\s*[: ]\s*(.+)$",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not m2:
+            return None
+
+        tail = (m2.group(2) or "").strip()
+        # Remove sufixos de localização (ex: 'na área de trabalho', 'no disco D')
+        tail = re.split(
+            r"\b(no|na|em)\b\s+(?:[aá]rea de trabalho|desktop|disco|ssd|drive)\b",
+            tail,
+            flags=re.IGNORECASE,
+        )[0].strip()
+        return tail.strip().strip('"').strip("'")
 
     # Regra: screenshot
     if re.search(r"\b(screenshot|printscreen|print screen|captura de tela|tire uma captura)\b", norm):
@@ -136,6 +159,16 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, abri a Calculadora do Windows.",
         )
 
+    # Regra: abrir Discord
+    if "discord" in norm and re.search(r"\b(abrir|abra|abre|open)\b", norm):
+        return Plan(
+            intent="os.open_app",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "discord"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, abri o Discord.",
+        )
+
     # Regra: OCR
     if re.search(r"\b(ocr|ler tela|leia a tela|o que esta escrito|o que esta na tela)\b", norm):
         return Plan(
@@ -147,15 +180,61 @@ def _route_heuristic(user_message: str) -> Plan:
         )
 
     # Regra: criar pasta (mkdir)
-    m = re.search(r"\b(criar|crie|cria|make|mkdir)\b\s+\b(pasta|diretorio|diret[oó]rio|folder|dir)\b\s*[:]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    m = re.search(
+        r"\b(criar|crie|cria|make|mkdir)\b.*\b(pasta|diretorio|diret[oó]rio|folder|dir)\b",
+        msg,
+        flags=re.IGNORECASE,
+    )
     if m:
-        path = m.group(3).strip().strip('"').strip("'")
+        name = _guess_folder_name(msg)
+        if not name:
+            return Plan(
+                intent="chat",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="echo", args={"text": msg})],
+                risk=RiskLevel.LOW,
+                final_response="Qual nome da pasta? (ex: criar pasta: data/minha_pasta)",
+            )
+
+        # Desktop/Área de Trabalho (resolve via Known Folder; inclui OneDrive redirecionado)
+        if re.search(r"\b([aá]rea de trabalho|desktop)\b", norm):
+            return Plan(
+                intent="os.mkdir",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="os.mkdir", args={"known_folder": "desktop", "name": name})],
+                risk=RiskLevel.HIGH,
+                final_response=f"Ok, criei a pasta na Área de Trabalho: {name}",
+            )
+
+        # Drive específico (ex: D:, 'disco D', 'SSD (D:)')
+        drive = None
+        m_drive = re.search(r"\b([c-zC-Z])\s*:\b", msg)
+        if m_drive:
+            drive = m_drive.group(1).upper()
+        else:
+            m_drive2 = re.search(r"\bdisco\s+([c-z])\b", norm)
+            if m_drive2:
+                drive = m_drive2.group(1).upper()
+            elif re.search(r"\bssd\b", norm) and re.search(r"\b[dD]\b", msg):
+                drive = "D"
+
+        if drive:
+            return Plan(
+                intent="os.mkdir",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="os.mkdir", args={"path": f"{drive}:/{name}"})],
+                risk=RiskLevel.HIGH,
+                final_response=f"Ok, criei a pasta em {drive}:\\{name}",
+            )
+
+        # Default: workspace
+        rel = name.replace("\\", "/")
         return Plan(
             intent="fs.mkdir",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="fs.mkdir", args={"path": path})],
+            tool_calls=[ToolCall(tool_name="fs.mkdir", args={"path": rel})],
             risk=RiskLevel.LOW,
-            final_response=f"Ok, criei a pasta: {path}",
+            final_response=f"Ok, criei a pasta no workspace: {rel}",
         )
 
     # Regra: copiar arquivo/pasta
@@ -485,7 +564,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- write_file -> {path, content}\n"
         "- os.open_url -> {url} (apenas http/https)\n"
         "- os.open_explorer -> {path?} (path relativo; default '.')\n"
-        "- os.open_app -> {app} (allowlist: calculator, notepad, paint, snippingtool)\n"
+        "- os.open_app -> {app} (allowlist: calculator, notepad, paint, snippingtool, discord)\n"
+        "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
         "- web.screenshot -> {url, path?}\n"

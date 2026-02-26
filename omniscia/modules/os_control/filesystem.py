@@ -17,6 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 from typing import Any
+import sys
+import ctypes
+from ctypes import wintypes
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
@@ -59,6 +62,18 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         ToolSpec(
+            name="os.mkdir",
+            description=(
+                "Cria diretório (mkdir -p) fora do workspace (Windows). "
+                "Aceita path absoluto (ex: D:/Pasta) ou known_folder+name (desktop/downloads/documents)."
+            ),
+            risk="HIGH",
+            fn=_os_mkdir,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
             name="fs.copy",
             description="Copia arquivo/pasta (recursivo) em paths relativos (não sobrescreve por padrão)",
             risk="MEDIUM",
@@ -80,8 +95,10 @@ def _safe_rel_path(raw: str) -> Path:
     path = (raw or "").strip().replace("\\", "/")
     if not path:
         raise ValueError("path vazio")
+    if path.startswith("~") or "/~" in path or "~" in path.split("/"):
+        raise ValueError("path não pode usar '~' (use path relativo ao workspace)")
     if path.startswith("/") or ":" in path:
-        raise ValueError("path deve ser relativo")
+        raise ValueError("path deve ser relativo ao workspace")
 
     p = Path(path)
 
@@ -162,6 +179,133 @@ def _fs_mkdir(args: dict[str, Any]) -> ToolResult:
         p = _safe_rel_path(str(args.get("path", "")))
         p.mkdir(parents=True, exist_ok=True)
         return ToolResult(status="ok", output=f"created dir {p}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _win_known_folder(name: str) -> Path:
+    """Resolve Windows Known Folders reliably (supports OneDrive redirection)."""
+
+    if not sys.platform.startswith("win"):
+        raise RuntimeError("known_folder só é suportado no Windows")
+
+    known = (name or "").strip().lower()
+
+    # GUIDs from Windows Known Folder IDs
+    folder_ids = {
+        "desktop": "{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}",
+        "documents": "{FDD39AD0-238F-46AF-ADB4-6C85480369C7}",
+        "downloads": "{374DE290-123F-4565-9164-39C4925E467B}",
+    }
+    if known not in folder_ids:
+        raise ValueError("known_folder inválido (use: desktop, downloads, documents)")
+
+    guid_str = folder_ids[known]
+
+    class GUID(ctypes.Structure):
+        _fields_ = [
+            ("Data1", wintypes.DWORD),
+            ("Data2", wintypes.WORD),
+            ("Data3", wintypes.WORD),
+            ("Data4", wintypes.BYTE * 8),
+        ]
+
+    import uuid
+
+    u = uuid.UUID(guid_str)
+    guid = GUID(
+        u.fields[0],
+        u.fields[1],
+        u.fields[2],
+        (wintypes.BYTE * 8)(*u.bytes[8:]),
+    )
+
+    p_path = wintypes.LPWSTR()
+    SHGetKnownFolderPath = ctypes.windll.shell32.SHGetKnownFolderPath
+    SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(wintypes.LPWSTR)]
+    SHGetKnownFolderPath.restype = wintypes.HRESULT
+
+    hr = SHGetKnownFolderPath(ctypes.byref(guid), 0, 0, ctypes.byref(p_path))
+    if hr != 0:
+        raise RuntimeError(f"SHGetKnownFolderPath falhou (hr={hr})")
+
+    try:
+        return Path(p_path.value)
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(p_path)
+
+
+def _safe_rel_subpath(raw: str) -> Path:
+    """Relative subpath without drive/root/traversal. Used under known folders."""
+    s = (raw or "").strip().strip('"').strip("'").replace("\\", "/")
+    if not s:
+        raise ValueError("name vazio")
+    if s.startswith("/") or ":" in s:
+        raise ValueError("name deve ser relativo")
+    if s.startswith("~") or "/~" in s or "~" in s.split("/"):
+        raise ValueError("name não pode usar '~'")
+    p = Path(s)
+    if any(part == ".." for part in p.parts):
+        raise ValueError("name não pode conter '..'")
+    return p
+
+
+def _safe_abs_windows_path(raw: str) -> Path:
+    s = (raw or "").strip().strip('"').strip("'").replace("/", "\\")
+    if not s:
+        raise ValueError("path vazio")
+    if not sys.platform.startswith("win"):
+        raise RuntimeError("os.mkdir (path absoluto) só é suportado no Windows")
+    p = Path(s)
+    if not p.is_absolute() or ":" not in s[:3]:
+        raise ValueError("path deve ser absoluto (ex: D:\\Pasta)")
+    if any(part == ".." for part in p.parts):
+        raise ValueError("path não pode conter '..'")
+
+    # Não permitir criar diretamente na raiz do drive (ex: D:\)
+    if p == Path(p.anchor):
+        raise ValueError("path inválido (não use a raiz do drive)")
+
+    low = str(p).lower()
+    # Bloqueios básicos de áreas sensíveis (não é uma lista exaustiva)
+    blocked_prefixes = [
+        "c:\\windows",
+        "c:\\program files",
+        "c:\\program files (x86)",
+    ]
+    if any(low.startswith(pref) for pref in blocked_prefixes):
+        raise PermissionError("path não permitido (diretório do sistema)")
+
+    return p
+
+
+def _os_mkdir(args: dict[str, Any]) -> ToolResult:
+    """Creates directories outside workspace with explicit guardrails."""
+
+    try:
+        known_folder = str(args.get("known_folder", "") or "").strip().lower()
+        name = str(args.get("name", "") or "").strip()
+        raw_path = str(args.get("path", "") or "").strip()
+
+        target: Path
+
+        # Option A: known_folder + name
+        if known_folder:
+            base = _win_known_folder(known_folder)
+            sub = _safe_rel_subpath(name)
+            target = (base / sub).resolve()
+        else:
+            # Option B: string path with optional prefix desktop:/...
+            if raw_path.lower().startswith(("desktop:", "downloads:", "documents:")):
+                prefix, rest = raw_path.split(":", 1)
+                base = _win_known_folder(prefix)
+                sub = _safe_rel_subpath(rest)
+                target = (base / sub).resolve()
+            else:
+                target = _safe_abs_windows_path(raw_path)
+
+        target.mkdir(parents=True, exist_ok=True)
+        return ToolResult(status="ok", output=f"created dir {target}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))
 

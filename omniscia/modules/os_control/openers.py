@@ -56,6 +56,8 @@ _ALLOW_APPS = {
     "notepad": "notepad.exe",
     "paint": "mspaint.exe",
     "snippingtool": "snippingtool.exe",
+    # Discord: melhor via URL scheme (não depende do PATH)
+    "discord": "discord://",
 }
 
 
@@ -69,6 +71,7 @@ _APP_ALIASES = {
     "paintbrush": "paint",
     "ferramenta de captura": "snippingtool",
     "captura": "snippingtool",
+    "dc": "discord",
 }
 
 
@@ -76,6 +79,8 @@ def _safe_rel_path(raw: str) -> Path:
     path = (raw or "").strip().replace("\\", "/")
     if not path:
         path = "."
+    if path.startswith("~") or "/~" in path or "~" in path.split("/"):
+        raise ValueError("path não pode usar '~' (use path relativo ao workspace)")
     if path.startswith("/") or ":" in path:
         raise ValueError("path deve ser relativo")
 
@@ -159,8 +164,12 @@ def _os_open_app(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error="os.open_app (MVP) suporta apenas Windows")
 
     try:
-        exe = _ALLOW_APPS[app]
-        subprocess.Popen([exe], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
+        target = _ALLOW_APPS[app]
+        if "://" in target:
+            os.startfile(target)  # noqa: S606
+            return ToolResult(status="ok", output=f"opened app {app}")
+
+        subprocess.Popen([target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
         return ToolResult(status="ok", output=f"opened app {app}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))

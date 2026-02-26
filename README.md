@@ -246,11 +246,12 @@ Exemplos de intenção:
 ## Abrir apps allowlisted (Windows)
 
 Para abrir apps comuns sem usar `dev.exec`, use:
-- `os.open_app` com `app` na allowlist (ex.: `calculator`, `notepad`, `paint`, `snippingtool`).
+- `os.open_app` com `app` na allowlist (ex.: `calculator`, `notepad`, `paint`, `snippingtool`, `discord`).
 
 Exemplos:
 - "abre a calculadora"
 - "abre o bloco de notas"
+- "abre o discord"
 
 ## Rotinas de arquivos (workspace)
 
@@ -260,6 +261,15 @@ Além de listar/ler/apagar, o agente também pode:
 - `fs.move` mover/renomear
 
 Obs: tudo é **path relativo** (sem `C:\\` e sem `..`). Por padrão não sobrescreve; use `overwrite=true` quando fizer sentido (vai passar pelo HITL conforme risco).
+
+## Criar pasta fora do workspace (Windows)
+
+Para criar pastas em locais do Windows (ex.: Área de Trabalho real/OneDrive, Downloads, Documents, ou drive D:), use:
+- `os.mkdir` (HIGH; passa pelo HITL)
+
+Exemplos:
+- `os.mkdir` com `known_folder=desktop` e `name="teste da ia"`
+- `os.mkdir` com `path="D:/teste da ia"`
 
 ## Web (read-only)
 
