@@ -223,7 +223,8 @@ def _win_known_folder(name: str) -> Path:
     p_path = wintypes.LPWSTR()
     SHGetKnownFolderPath = ctypes.windll.shell32.SHGetKnownFolderPath
     SHGetKnownFolderPath.argtypes = [ctypes.POINTER(GUID), wintypes.DWORD, wintypes.HANDLE, ctypes.POINTER(wintypes.LPWSTR)]
-    SHGetKnownFolderPath.restype = wintypes.HRESULT
+    # Python 3.13+ may not expose HRESULT on ctypes.wintypes; ctypes.HRESULT exists.
+    SHGetKnownFolderPath.restype = getattr(wintypes, "HRESULT", ctypes.HRESULT)
 
     hr = SHGetKnownFolderPath(ctypes.byref(guid), 0, 0, ctypes.byref(p_path))
     if hr != 0:
