@@ -80,7 +80,7 @@ def run_command(
     argv: list[str],
     cwd: str | Path = ".",
     timeout_s: float = 60.0,
-    max_output_chars: int = 12000,
+    max_output_chars: int = 3500,
     env: dict[str, str] | None = None,
 ) -> ExecResult:
     """Executa argv e retorna stdout/stderr.

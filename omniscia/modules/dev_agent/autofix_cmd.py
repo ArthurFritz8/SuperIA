@@ -102,8 +102,8 @@ def autofix_command(
     command: str,
     max_iters: int = 3,
     timeout_s: float = 120.0,
-    max_files: int = 4,
-    max_file_chars: int = 18000,
+    max_files: int = 2,
+    max_file_chars: int = 6000,
 ) -> AutoFixCmdResult:
     """Executa um comando e tenta corrigir falhas via LLM."""
 
