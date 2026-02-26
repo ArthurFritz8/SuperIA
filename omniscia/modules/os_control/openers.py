@@ -20,6 +20,7 @@ from typing import Any
 import json
 import re
 import unicodedata
+import time
 
 from omniscia.core.config import Settings
 
@@ -101,6 +102,14 @@ _ALLOW_APPS = {
     # Media/games (via URL schemes quando possível)
     "steam": "steam://open/main",
     "spotify": "spotify:",
+
+    # Alvos potencialmente perigosos (permitidos SOMENTE quando HITL estiver habilitado).
+    # A confirmação (YES) é aplicada no core via composição de risco.
+    "cmd": "cmd.exe",
+    "powershell": "powershell.exe",
+    "pwsh": "pwsh.exe",
+    "terminal": "wt.exe",
+    "regedit": "regedit.exe",
 }
 
 
@@ -154,6 +163,41 @@ _DENY_TARGET_BASENAMES = {
     "regedit.exe",
     "schtasks.exe",
 }
+
+
+_SHORTCUT_CACHE: dict[str, str] | None = None
+_SHORTCUT_CACHE_TS: float = 0.0
+
+
+def _shortcut_allowlist(*, max_apps: int = 900, ttl_s: float = 300.0) -> dict[str, str]:
+    """Build (and cache) a mapping key->.lnk absolute path from Windows shortcuts.
+
+    Objetivo:
+    - Permitir abrir apps sem o usuário ter que manter allowlist manual.
+    - Mantém guardrails: ainda depende das regras de risco/HITL no core.
+    """
+
+    global _SHORTCUT_CACHE, _SHORTCUT_CACHE_TS
+
+    if not sys.platform.startswith("win"):
+        return {}
+
+    now = time.time()
+    if _SHORTCUT_CACHE is not None and (now - _SHORTCUT_CACHE_TS) < float(ttl_s):
+        return dict(_SHORTCUT_CACHE)
+
+    apps = _collect_shortcuts(max_results=max_apps)
+    mapping: dict[str, str] = {}
+    for item in apps:
+        key = str(item.get("key") or "").strip().lower()
+        target = str(item.get("target") or "").strip()
+        if not key or not target:
+            continue
+        mapping[key] = target
+
+    _SHORTCUT_CACHE = dict(mapping)
+    _SHORTCUT_CACHE_TS = now
+    return mapping
 
 
 def _slug_key(name: str) -> str:
@@ -238,12 +282,6 @@ def _collect_shortcuts(*, max_results: int = 600) -> list[dict[str, str]]:
                 key = _slug_key(name)
                 # Keep it as forward-slash path in JSON for readability.
                 target = str(p.resolve()).replace("\\", "/")
-
-                # Skip blocked targets by basename (best-effort).
-                if os.path.basename(target).lower() in _DENY_TARGET_BASENAMES:
-                    continue
-                if key in _DENY_APP_KEYS:
-                    continue
 
                 results.append({"key": key, "name": name, "target": target})
             except Exception:
@@ -431,31 +469,100 @@ def _os_open_app(args: dict[str, Any], *, settings: Settings | None = None) -> T
     if not app:
         return ToolResult(status="error", error="app vazio")
 
-    if app in _DENY_APP_KEYS:
-        return ToolResult(status="error", error="app bloqueado por segurança")
-
     allow_apps = dict(_ALLOW_APPS)
     allow_apps.update(_load_extra_allow_apps(settings))
 
+    # Se não estiver na allowlist explícita, tentamos resolver por atalhos do Windows.
+    # Isso elimina a necessidade do usuário "adicionar" apps manualmente.
+    if app not in allow_apps and sys.platform.startswith("win"):
+        shortcuts = _shortcut_allowlist()
+        if app in shortcuts:
+            allow_apps[app] = shortcuts[app]
+        else:
+            # Fallback: match por substring (ex: "whatsapp" casa com "whatsapp_desktop").
+            candidates = [k for k in shortcuts.keys() if app and (k == app or app in k)]
+            # Se ficar muito amplo, tenta só prefixo.
+            if len(candidates) > 12:
+                candidates = [k for k in shortcuts.keys() if app and k.startswith(app)]
+
+            candidates = sorted(set(candidates))
+            if len(candidates) == 1:
+                k = candidates[0]
+                allow_apps[app] = shortcuts[k]
+            elif len(candidates) > 1:
+                preview = ", ".join(candidates[:10])
+                more = "" if len(candidates) <= 10 else f" (+{len(candidates) - 10} outros)"
+                return ToolResult(
+                    status="error",
+                    error=f"app ambíguo. tente um destes: {preview}{more}",
+                )
+
     if app not in allow_apps:
-        allowed = ", ".join(sorted(allow_apps.keys()))
-        return ToolResult(status="error", error=f"app não permitido. allowlist: {allowed}")
+        allowed = ", ".join(sorted(list(allow_apps.keys()))[:80])
+        more = "" if len(allow_apps) <= 80 else f" (+{len(allow_apps) - 80} outros)"
+        return ToolResult(status="error", error=f"app não encontrado. exemplos: {allowed}{more}")
 
     if not sys.platform.startswith("win"):
         return ToolResult(status="error", error="os.open_app (MVP) suporta apenas Windows")
+
+    # Ajuda: abrir via Shell (os.startfile) tende a não anexar no console atual,
+    # evitando apps Electron imprimirem logs no terminal do agente.
+    def _startfile_safe(path_or_uri: str) -> None:
+        os.startfile(path_or_uri)  # noqa: S606
+
+    def _popen_detached(argv: list[str]) -> None:
+        # DETACHED_PROCESS (0x00000008) e CREATE_NEW_PROCESS_GROUP (0x00000200)
+        # reduzem chance do filho herdar/usar o console do processo pai.
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_NO_WINDOW = 0x08000000
+        subprocess.Popen(  # noqa: S603,S607
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            close_fds=True,
+        )
 
     try:
         target = str(allow_apps[app]).strip()
         if not target:
             return ToolResult(status="error", error="target vazio")
 
+        # Caso especial: Discord. Preferimos o URL scheme para não poluir o console.
+        if app == "discord":
+            # 1) Tenta Update.exe em LOCALAPPDATA (abre GUI sem anexar console).
+            local = os.environ.get("LOCALAPPDATA")
+            if local:
+                for folder in ("Discord", "DiscordCanary", "DiscordPTB"):
+                    update = Path(local) / folder / "Update.exe"
+                    if update.exists() and update.is_file():
+                        _popen_detached([str(update), "--processStart", "Discord.exe"])
+                        return ToolResult(status="ok", output=f"opened app {app}")
+
+            # 2) Fallback: scheme handler.
+            try:
+                _startfile_safe("discord://")
+                return ToolResult(status="ok", output=f"opened app {app}")
+            except Exception:
+                # 3) Fallback: usa target configurado (exe/lnk)
+                pass
+
+        # Alvos potencialmente perigosos: não bloqueia de vez, mas exige HITL habilitado.
+        # A confirmação (YES) é garantida pelo core ao elevar o risco do plano para CRITICAL.
         base = os.path.basename(target).lower()
-        if base in _DENY_TARGET_BASENAMES:
-            return ToolResult(status="error", error="target bloqueado por segurança")
+        if app in _DENY_APP_KEYS or base in _DENY_TARGET_BASENAMES:
+            if settings is None or not settings.hitl_enabled:
+                return ToolResult(
+                    status="error",
+                    error="alvo perigoso requer HITL habilitado (OMNI_HITL_ENABLED=true)",
+                )
 
         # URL schemes / protocol handlers (discord://, steam://, spotify:)
+        # Nota: aqui dependemos do Shell; na prática, isso não deve anexar logs no console.
         if "://" in target or target.endswith(":") or target.startswith("ms-settings:"):
-            os.startfile(target)  # noqa: S606
+            _startfile_safe(target)
             return ToolResult(status="ok", output=f"opened app {app}")
 
         # Absolute path to exe/lnk
@@ -465,10 +572,16 @@ def _os_open_app(args: dict[str, Any], *, settings: Settings | None = None) -> T
                 return ToolResult(status="error", error=f"executável não existe: {p}")
             if p.suffix.lower() not in {".exe", ".lnk"}:
                 return ToolResult(status="error", error="target deve ser .exe ou .lnk")
-            subprocess.Popen([str(p)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
+
+            # Sempre abrir de forma silenciosa (detached), para não poluir o console do agente.
+            if p.suffix.lower() == ".lnk":
+                # Explorer abre atalhos sem anexar no console.
+                _popen_detached(["explorer.exe", str(p)])
+            else:
+                _popen_detached([str(p)])
             return ToolResult(status="ok", output=f"opened app {app}")
 
-        subprocess.Popen([target], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # noqa: S603,S607
+        _popen_detached([target])
         return ToolResult(status="ok", output=f"opened app {app}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))

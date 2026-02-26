@@ -137,6 +137,25 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, abri o Explorador de Arquivos.",
         )
 
+    # Regra: abrir alvos potencialmente perigosos (sempre pede HITL)
+    if re.search(r"\b(abrir|abra|abre|open)\b", norm):
+        dangerous_map = {
+            "cmd": r"\b(cmd|prompt de comando|command prompt)\b",
+            "powershell": r"\b(power\s*shell|powershell)\b",
+            "pwsh": r"\b(pwsh)\b",
+            "terminal": r"\b(windows terminal|terminal)\b",
+            "regedit": r"\b(regedit|editor do registro|registro)\b",
+        }
+        for app_key, pat in dangerous_map.items():
+            if re.search(pat, norm):
+                return Plan(
+                    intent="os.open_app",
+                    user_message=msg,
+                    tool_calls=[ToolCall(tool_name="os.open_app", args={"app": app_key})],
+                    risk=RiskLevel.CRITICAL,
+                    final_response="Ok — vou abrir isso (requer aprovação).",
+                )
+
     # Regra: gerar allowlist de apps automaticamente
     if re.search(r"\b(gerar|criar|montar)\b.*\b(allowlist|lista)\b.*\b(app|apps|programa|programas)\b", norm):
         return Plan(
@@ -192,6 +211,30 @@ def _route_heuristic(user_message: str) -> Plan:
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri o Discord.",
         )
+
+    # Regra: enviar mensagem no Discord
+    # Exemplos:
+    # - "mandar mensagem para Alice no discord: oi"
+    # - "enviar msg discord para \"Alice\": tudo bem?"
+    m = re.search(
+        r"\b(mandar|enviar)\b.*\b(mensagem|msg)\b.*\b(para|pra)\b\s*(?P<to>[^:]+?)\s*(?:\bno\b\s*discord|\bdiscord\b)?\s*[:\-]\s*(?P<text>.+)$",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        to = (m.group("to") or "").strip().strip('"').strip("'")
+        text = (m.group("text") or "").strip()
+        if to and text:
+            return Plan(
+                intent="discord.send_message",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="os.open_app", args={"app": "discord"}),
+                    ToolCall(tool_name="discord.send_message", args={"to": to, "message": text, "settle_ms": 900}),
+                ],
+                risk=RiskLevel.CRITICAL,
+                final_response="Ok — vou enviar a mensagem no Discord (requer aprovação).",
+            )
 
     # Regra: OCR
     if re.search(r"\b(ocr|ler tela|leia a tela|o que esta escrito|o que esta na tela)\b", norm):
@@ -581,6 +624,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "REGRAS DE RISCO:\n"
         "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
         "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
+        "REGRAS ESPECÍFICAS:\n"
+        "- Se usar discord.send_message, inclua antes um os.open_app com app='discord' para garantir que o Discord esteja aberto/em foco.\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
         "- core.show_settings -> {}\n"
         "- core.list_tools -> {}\n"
@@ -589,6 +634,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- os.open_url -> {url} (apenas http/https)\n"
         "- os.open_explorer -> {path?} (path relativo; default '.')\n"
         "- os.open_app -> {app} (allowlist configurável via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON; exemplos: calculator, notepad, paint, snippingtool, discord)\n"
+        "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows; retorna rect)\n"
+        "- discord.send_message -> {to, message, settle_ms?} (CRITICAL; requer Discord em foco)\n"
         "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
@@ -602,8 +649,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- fs.delete -> {path} (CRITICAL)\n"
         "- screen.screenshot -> {}\n"
         "- screen.ocr -> {path?}\n"
-        "- screen.find_text -> {query, path?, max_results?, min_conf?} (retorna caixas x/y/w/h)\n"
-        "- screen.click_text -> {query, path?, min_conf?} (CRITICAL)\n"
+        "- screen.find_text -> {query, path?, window_title?, max_results?, min_conf?} (retorna caixas x/y/w/h)\n"
+        "- screen.click_text -> {query, path?, window_title?, min_conf?} (CRITICAL)\n"
         "- gui.get_mouse -> {}\n"
         "- gui.move_mouse -> {x, y}\n"
         "- gui.click -> {x, y} (CRITICAL)\n"

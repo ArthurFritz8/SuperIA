@@ -25,6 +25,7 @@ import json
 from omniscia.core.config import Settings
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
+from omniscia.modules.os_control.win_windows import focus_window_by_title_contains
 
 
 @dataclass(frozen=True)
@@ -151,6 +152,7 @@ def _screen_find_text(args: dict[str, Any], *, settings: Settings) -> ToolResult
     Args aceitos:
     - query: texto a procurar (obrigatório)
     - path: PNG relativo (opcional). Se ausente, tira screenshot e faz OCR.
+    - window_title: substring do título de uma janela (opcional, Windows). Se presente, foca a janela e recorta OCR nela.
     - lang: idioma do Tesseract (default: por+eng)
     - max_results: limite de caixas retornadas (default: 10)
     - min_conf: confiança mínima (0-100) (default: 55)
@@ -178,8 +180,13 @@ def _screen_find_text(args: dict[str, Any], *, settings: Settings) -> ToolResult
 
     q_norm = query.casefold()
 
+    window_title = str(args.get("window_title", "") or "").strip()
+
     try:
         raw_path = args.get("path") or args.get("image_path")
+        offset_x = 0
+        offset_y = 0
+
         if raw_path:
             p = _safe_rel_png(str(raw_path))
             if not p.exists():
@@ -189,9 +196,30 @@ def _screen_find_text(args: dict[str, Any], *, settings: Settings) -> ToolResult
             import mss
 
             with mss.mss() as sct:
-                monitor = sct.monitors[1]
+                # Para suportar multi-monitor e janelas em outros monitores,
+                # usamos o monitor virtual (monitors[0]) quando window_title for usado.
+                monitor = sct.monitors[0] if window_title else sct.monitors[1]
                 shot = sct.grab(monitor)
                 img = Image.frombytes("RGB", shot.size, shot.rgb)
+                offset_x = int(getattr(shot, "left", 0) or 0)
+                offset_y = int(getattr(shot, "top", 0) or 0)
+
+                if window_title:
+                    rect = focus_window_by_title_contains(window_title, timeout_s=2.5)
+                    if not rect:
+                        return ToolResult(status="error", error="janela não encontrada para window_title")
+
+                    # Ajuste para coordenadas da imagem do monitor virtual.
+                    left = int(rect["left"] - offset_x)
+                    top = int(rect["top"] - offset_y)
+                    right = int(rect["right"] - offset_x)
+                    bottom = int(rect["bottom"] - offset_y)
+                    if right <= left or bottom <= top:
+                        return ToolResult(status="error", error="rect inválido")
+                    # Crop e define offset para devolver caixas em coordenadas globais.
+                    img = img.crop((left, top, right, bottom))
+                    offset_x = int(rect["left"])
+                    offset_y = int(rect["top"])
 
         # Grayscale ajuda OCR.
         img = img.convert("L")
@@ -216,8 +244,8 @@ def _screen_find_text(args: dict[str, Any], *, settings: Settings) -> ToolResult
             if q_norm not in raw_text.casefold():
                 continue
 
-            left = int((data.get("left") or [0])[i] or 0)
-            top = int((data.get("top") or [0])[i] or 0)
+            left = int((data.get("left") or [0])[i] or 0) + int(offset_x)
+            top = int((data.get("top") or [0])[i] or 0) + int(offset_y)
             width = int((data.get("width") or [0])[i] or 0)
             height = int((data.get("height") or [0])[i] or 0)
 
@@ -289,6 +317,7 @@ def _screen_click_text(args: dict[str, Any], *, settings: Settings) -> ToolResul
             "query": query,
             "path": args.get("path"),
             "image_path": args.get("image_path"),
+            "window_title": args.get("window_title"),
             "lang": args.get("lang", "por+eng"),
             "max_results": 5,
             "min_conf": min_conf,

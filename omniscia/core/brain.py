@@ -13,8 +13,11 @@ Observação importante:
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import re
+from pathlib import Path
 from rich.console import Console
 from rich.panel import Panel
 
@@ -84,7 +87,7 @@ def run_brain_loop(settings: Settings) -> None:
 
 
 def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
-    effective_risk = _effective_risk_for_plan(plan, registry)
+    effective_risk = _effective_risk_for_plan(plan, registry, settings=settings)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
     normalized_plan, normalize_note = _normalize_plan_args(effective_plan, settings=settings)
@@ -342,7 +345,7 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
     return a, note, did
 
 
-def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
+def _effective_risk_for_plan(plan: Plan, registry, *, settings: Settings | None = None) -> RiskLevel:
     """Calcula o risco efetivo (router + risco intrínseco das tools).
 
     Motivação:
@@ -369,6 +372,99 @@ def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
         except Exception:
             return RiskLevel.LOW
 
+    def _load_open_apps_from_settings(settings: Settings | None) -> dict[str, str]:
+        if settings is None:
+            return {}
+
+        out: dict[str, str] = {}
+
+        def _merge(mapping) -> None:
+            if not isinstance(mapping, dict):
+                return
+            for k, v in mapping.items():
+                key = str(k).strip().lower()
+                if not key:
+                    continue
+                out[key] = str(v).strip()
+
+        raw_json = (settings.open_apps_json or "").strip()
+        if raw_json:
+            try:
+                _merge(json.loads(raw_json))
+            except Exception:
+                pass
+
+        raw_file = (settings.open_apps_file or "").strip()
+        if raw_file:
+            try:
+                p = Path(raw_file)
+                if not p.is_absolute():
+                    p = Path.cwd() / p
+                if p.exists() and p.is_file():
+                    _merge(json.loads(p.read_text(encoding="utf-8", errors="replace")))
+            except Exception:
+                pass
+
+        return out
+
+    def dynamic_tool_risk(tool_name: str, args: dict) -> RiskLevel | None:
+        """Eleva risco com base em args (política de segurança).
+
+        Nota:
+        - Isso existe para casos onde a mesma tool pode ser segura ou perigosa
+          dependendo do alvo (ex: abrir apps comuns vs. abrir cmd/powershell).
+        """
+
+        if tool_name == "os.open_app":
+            app = str((args or {}).get("app", "")).strip().lower()
+            # Normaliza: remove espaços e underscores para comparar com mais robustez.
+            app_norm = app.replace(" ", "").replace("_", "")
+            dangerous_keys = {
+                # shells / scripting
+                "cmd",
+                "commandprompt",
+                "powershell",
+                "pwsh",
+                "terminal",
+                "windows terminal",
+                "wscript",
+                "cscript",
+                "mshta",
+                "rundll32",
+                # registry / scheduled tasks
+                "regedit",
+                "registry",
+                "reg",
+                "taskschd",
+                "schtasks",
+            }
+            dangerous_norm = {k.replace(" ", "").replace("_", "") for k in dangerous_keys}
+            if app_norm in dangerous_norm:
+                return RiskLevel.CRITICAL
+
+            # Se o app for um alias customizado, resolvemos o target via Settings.
+            # Assim também pedimos HITL quando o target é um executável perigoso.
+            extra = _load_open_apps_from_settings(settings)
+            target = str(extra.get(app, "")).strip()
+            if target:
+                base = os.path.basename(target).lower()
+                dangerous_basenames = {
+                    "cmd.exe",
+                    "powershell.exe",
+                    "pwsh.exe",
+                    "wscript.exe",
+                    "cscript.exe",
+                    "mshta.exe",
+                    "rundll32.exe",
+                    "reg.exe",
+                    "regedit.exe",
+                    "schtasks.exe",
+                }
+                if base in dangerous_basenames:
+                    return RiskLevel.CRITICAL
+
+        return None
+
     current = plan.risk
 
     for call in plan.tool_calls:
@@ -377,6 +473,10 @@ def _effective_risk_for_plan(plan: Plan, registry) -> RiskLevel:
             tool_risk = parse_tool_risk(getattr(spec, "risk", "LOW"))
         except Exception:
             tool_risk = RiskLevel.CRITICAL
+
+        dyn = dynamic_tool_risk(call.tool_name, call.args)
+        if dyn is not None and rank(dyn) > rank(tool_risk):
+            tool_risk = dyn
 
         if rank(tool_risk) > rank(current):
             current = tool_risk
