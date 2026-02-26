@@ -18,6 +18,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 import json
+import re
+import unicodedata
 
 from omniscia.core.config import Settings
 
@@ -49,6 +51,30 @@ def register_open_tools(registry: ToolRegistry, settings: Settings | None = None
             description="Abre um app allowlisted no sistema (ex: calculator)",
             risk="MEDIUM",
             fn=lambda args: _os_open_app(args, settings=settings),
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="os.scan_apps",
+            description=(
+                "Lista atalhos de apps no Windows (Menu Iniciar/Desktop) para ajudar a montar a allowlist. "
+                "Retorna JSON com {key,name,target}."
+            ),
+            risk="LOW",
+            fn=_os_scan_apps,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="os.generate_open_apps",
+            description=(
+                "Gera um JSON (app->target) no workspace a partir dos atalhos do Windows, "
+                "para usar em OMNI_OPEN_APPS_FILE."
+            ),
+            risk="HIGH",
+            fn=_os_generate_open_apps,
         )
     )
 
@@ -128,6 +154,159 @@ _DENY_TARGET_BASENAMES = {
     "regedit.exe",
     "schtasks.exe",
 }
+
+
+def _slug_key(name: str) -> str:
+    """Convert shortcut/app names into stable keys for JSON mapping."""
+
+    t = (name or "").strip().lower()
+    t = unicodedata.normalize("NFKD", t)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = re.sub(r"[^a-z0-9]+", "_", t).strip("_")
+    return t or "app"
+
+
+def _safe_rel_json_path(raw: str) -> Path:
+    """Workspace-relative path for generated JSON files."""
+
+    path = (raw or "").strip().strip('"').strip("'").replace("\\", "/")
+    if not path:
+        raise ValueError("out_path vazio")
+    if path.startswith("/") or ":" in path:
+        raise ValueError("out_path deve ser relativo")
+    if path.startswith("~") or "/~" in path or "~" in path.split("/"):
+        raise ValueError("out_path não pode usar '~'")
+    if ".." in path.split("/"):
+        raise ValueError("out_path não pode conter '..'")
+    if not path.lower().endswith(".json"):
+        raise ValueError("out_path deve terminar com .json")
+
+    root = Path.cwd().resolve()
+    resolved = (root / Path(path)).resolve()
+    try:
+        resolved.relative_to(root)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("out_path fora do workspace") from exc
+
+    return resolved
+
+
+def _win_shortcut_dirs() -> list[Path]:
+    """Start Menu + Desktop locations (not OneDrive-specific; shortcuts still work)."""
+
+    if not sys.platform.startswith("win"):
+        return []
+
+    dirs: list[Path] = []
+    program_data = os.environ.get("PROGRAMDATA") or "C:/ProgramData"
+    app_data = os.environ.get("APPDATA")
+    user_profile = os.environ.get("USERPROFILE")
+
+    dirs.append(Path(program_data) / "Microsoft" / "Windows" / "Start Menu" / "Programs")
+    if app_data:
+        dirs.append(Path(app_data) / "Microsoft" / "Windows" / "Start Menu" / "Programs")
+    if user_profile:
+        dirs.append(Path(user_profile) / "Desktop")
+
+    # Dedup + filter existing
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in dirs:
+        p = Path(str(d))
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.exists() and p.is_dir():
+            out.append(p)
+    return out
+
+
+def _collect_shortcuts(*, max_results: int = 600) -> list[dict[str, str]]:
+    """Collect .lnk shortcuts and produce suggested mapping entries."""
+
+    results: list[dict[str, str]] = []
+    if not sys.platform.startswith("win"):
+        return results
+
+    for base in _win_shortcut_dirs():
+        for p in base.rglob("*.lnk"):
+            if len(results) >= max_results:
+                return results
+            try:
+                name = p.stem
+                key = _slug_key(name)
+                # Keep it as forward-slash path in JSON for readability.
+                target = str(p.resolve()).replace("\\", "/")
+
+                # Skip blocked targets by basename (best-effort).
+                if os.path.basename(target).lower() in _DENY_TARGET_BASENAMES:
+                    continue
+                if key in _DENY_APP_KEYS:
+                    continue
+
+                results.append({"key": key, "name": name, "target": target})
+            except Exception:
+                continue
+
+    return results
+
+
+def _os_scan_apps(args: dict[str, Any]) -> ToolResult:
+    """List Windows shortcut apps for allowlist building."""
+
+    max_results = int(args.get("max_results", 600) or 600)
+    if max_results < 1:
+        max_results = 1
+    if max_results > 2000:
+        max_results = 2000
+
+    if not sys.platform.startswith("win"):
+        payload = {"apps": [], "count": 0, "note": "os.scan_apps só tem resultado no Windows"}
+        return ToolResult(status="ok", output=json.dumps(payload, ensure_ascii=False))
+
+    apps = _collect_shortcuts(max_results=max_results)
+    payload = {"apps": apps, "count": len(apps), "dirs": [str(p) for p in _win_shortcut_dirs()]}
+    return ToolResult(status="ok", output=json.dumps(payload, ensure_ascii=False))
+
+
+def _os_generate_open_apps(args: dict[str, Any]) -> ToolResult:
+    """Generate a mapping JSON in the workspace for OMNI_OPEN_APPS_FILE."""
+
+    out_path_raw = str(args.get("out_path", "data/open_apps.generated.json") or "").strip()
+    max_apps = int(args.get("max_apps", 350) or 350)
+    overwrite = bool(args.get("overwrite", False))
+
+    try:
+        out_path = _safe_rel_json_path(out_path_raw)
+        if out_path.exists() and not overwrite:
+            return ToolResult(status="error", error="out_path já existe (use overwrite=true)")
+
+        if not sys.platform.startswith("win"):
+            return ToolResult(status="error", error="os.generate_open_apps só é suportado no Windows")
+
+        apps = _collect_shortcuts(max_results=max_apps)
+        mapping: dict[str, str] = {}
+        used: set[str] = set()
+        for item in apps:
+            key = str(item.get("key") or "").strip().lower()
+            target = str(item.get("target") or "").strip()
+            if not key or not target:
+                continue
+            base = key
+            i = 2
+            while key in used:
+                key = f"{base}_{i}"
+                i += 1
+            used.add(key)
+            mapping[key] = target
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(mapping, ensure_ascii=False, indent=2), encoding="utf-8")
+        rel = str(out_path.relative_to(Path.cwd().resolve())).replace("\\", "/")
+        return ToolResult(status="ok", output=f"generated {rel} (apps={len(mapping)})")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
 
 
 def _load_extra_allow_apps(settings: Settings | None) -> dict[str, str]:

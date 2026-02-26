@@ -56,6 +56,8 @@ def route(settings: Settings, user_message: str) -> Plan:
         "os.open_url",
         "os.open_explorer",
         "os.open_app",
+        "os.scan_apps",
+        "os.generate_open_apps",
         "os.mkdir",
         # Filesystem routines
         "fs.list_dir",
@@ -133,6 +135,28 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="os.open_explorer", args={"path": "."})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri o Explorador de Arquivos.",
+        )
+
+    # Regra: gerar allowlist de apps automaticamente
+    if re.search(r"\b(gerar|criar|montar)\b.*\b(allowlist|lista)\b.*\b(app|apps|programa|programas)\b", norm):
+        return Plan(
+            intent="os.generate_open_apps",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.generate_open_apps", args={"out_path": "data/open_apps.generated.json", "overwrite": True})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok. Vou gerar um arquivo JSON com apps detectados para sua allowlist.",
+        )
+
+    # Regra: listar apps instalados/atalhos
+    if re.search(r"\b(listar|lista|mostrar|ver)\b.*\b(apps|programas)\b", norm) and re.search(
+        r"\b(instalados|atalhos|menu iniciar|menu|start)\b", norm
+    ):
+        return Plan(
+            intent="os.scan_apps",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.scan_apps", args={"max_results": 400})],
+            risk=RiskLevel.LOW,
+            final_response="Ok, vou listar atalhos de apps detectados.",
         )
 
     # Regra: abrir YouTube no navegador padrão

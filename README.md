@@ -252,6 +252,10 @@ Para deixar a allowlist **enorme**, ela é configurável:
 - `OMNI_OPEN_APPS_FILE` (caminho para um JSON com mapeamento `app -> target`)
 - `OMNI_OPEN_APPS_JSON` (o JSON inline)
 
+Atalho para gerar automaticamente esse JSON (Windows):
+- No agente: "gerar allowlist de apps" (cria `data/open_apps.generated.json`)
+- Depois aponte `OMNI_OPEN_APPS_FILE=data/open_apps.generated.json`
+
 Formato do JSON (`app -> target`):
 - `target` pode ser um executável (ex: `calc.exe`), um caminho absoluto para `.exe`/`.lnk`, ou um scheme (ex: `discord://`).
 
