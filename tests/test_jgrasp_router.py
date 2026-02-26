@@ -58,3 +58,13 @@ def test_router_jgrasp_math_is_deterministic_and_writes_code_only():
     assert [c.tool_name for c in plan.tool_calls] == ["jgrasp.write_code"]
     code = str(plan.tool_calls[0].args.get("code", ""))
     assert "class MatematicaDemo" in code
+
+
+def test_router_jgrasp_conta_defaults_to_math_code():
+    settings = Settings(router_mode="heuristic")
+    plan = route(settings, "quero que voce crie a conta tambem no jgrasp")
+    assert plan.intent == "jgrasp.write_code"
+    assert plan.risk == RiskLevel.HIGH
+    assert [c.tool_name for c in plan.tool_calls] == ["jgrasp.write_code"]
+    code = str(plan.tool_calls[0].args.get("code", ""))
+    assert "class ContaMatematica" in code

@@ -81,6 +81,7 @@ def route(settings: Settings, user_message: str) -> Plan:
         "win.focus_window",
         "discord.send_message",
         "jgrasp.create_java_program",
+        "jgrasp.write_code",
     }
     if heuristic.intent in deterministic_intents:
         return heuristic
@@ -88,6 +89,14 @@ def route(settings: Settings, user_message: str) -> Plan:
     if settings.router_mode == "llm":
         plan = _route_with_llm(settings, user_message)
         if plan is not None:
+            # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
+            norm = _normalize(user_message)
+            if any((c.tool_name or "").startswith("discord.") for c in plan.tool_calls):
+                asked_discord = "discord" in norm
+                asked_message = bool(re.search(r"\b(mensagem|msg|chat)\b", norm))
+                if not (asked_discord and asked_message):
+                    logger.warning("LLM plan attempted Discord tools without explicit user request; falling back to heuristic")
+                    return heuristic
             return plan
 
     return heuristic
@@ -359,6 +368,66 @@ def _route_heuristic(user_message: str) -> Plan:
                 risk=RiskLevel.HIGH,
                 final_response="Ok — vou escrever o código no editor do jGRASP (requer aprovação).",
             )
+
+    # Regra: "conta" no jGRASP = conta de matemática (evita LLM inventar 'conta/login')
+    if "jgrasp" in norm and re.search(r"\bconta\b", norm):
+        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
+            # Se o usuário mencionar login/senha/email, isso NÃO é matemática.
+            if re.search(r"\b(login|senha|email|e-mail|conta bancaria|banco|cadastro|registrar)\b", norm):
+                # Sem regra determinística: deixa o fluxo padrão (provavelmente LLM/heurística genérica).
+                pass
+            else:
+                code = (
+                    "import java.util.Scanner;\n\n"
+                    "public class ContaMatematica {\n"
+                    "    public static void main(String[] args) {\n"
+                    "        Scanner sc = new Scanner(System.in);\n"
+                    "        System.out.print(\"Digite A: \");\n"
+                    "        double a = sc.nextDouble();\n"
+                    "        System.out.print(\"Digite operador (+ - * /): \");\n"
+                    "        String op = sc.next();\n"
+                    "        System.out.print(\"Digite B: \");\n"
+                    "        double b = sc.nextDouble();\n\n"
+                    "        double r;\n"
+                    "        switch (op) {\n"
+                    "            case \"+\": r = a + b; break;\n"
+                    "            case \"-\": r = a - b; break;\n"
+                    "            case \"*\": r = a * b; break;\n"
+                    "            case \"/\":\n"
+                    "                if (b == 0) {\n"
+                    "                    System.out.println(\"Divisão por zero não é permitida.\");\n"
+                    "                    sc.close();\n"
+                    "                    return;\n"
+                    "                }\n"
+                    "                r = a / b;\n"
+                    "                break;\n"
+                    "            default:\n"
+                    "                System.out.println(\"Operador inválido.\");\n"
+                    "                sc.close();\n"
+                    "                return;\n"
+                    "        }\n\n"
+                    "        System.out.println(\"Resultado = \" + r);\n"
+                    "        sc.close();\n"
+                    "    }\n"
+                    "}\n"
+                )
+
+                return Plan(
+                    intent="jgrasp.write_code",
+                    user_message=msg,
+                    tool_calls=[
+                        ToolCall(
+                            tool_name="jgrasp.write_code",
+                            args={
+                                "code": code,
+                                "select_all": True,
+                                "settle_ms": 700,
+                            },
+                        )
+                    ],
+                    risk=RiskLevel.HIGH,
+                    final_response="Ok — vou escrever um código de conta de matemática no editor do jGRASP (requer aprovação).",
+                )
 
     # Regra: criar um programa/projeto no jGRASP (cria arquivo Java e abre no jGRASP)
     if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
