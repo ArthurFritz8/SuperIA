@@ -15,6 +15,7 @@ Nota:
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 from typing import Any
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
@@ -44,6 +45,33 @@ def register_filesystem_tools(registry: ToolRegistry) -> None:
             description="Apaga arquivo/pasta (recursivo) em path relativo (CRITICAL)",
             risk="CRITICAL",
             fn=_fs_delete,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fs.mkdir",
+            description="Cria diretório (mkdir -p) em path relativo",
+            risk="LOW",
+            fn=_fs_mkdir,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fs.copy",
+            description="Copia arquivo/pasta (recursivo) em paths relativos (não sobrescreve por padrão)",
+            risk="MEDIUM",
+            fn=_fs_copy,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fs.move",
+            description="Move/renomeia arquivo/pasta em paths relativos (não sobrescreve por padrão)",
+            risk="HIGH",
+            fn=_fs_move,
         )
     )
 
@@ -125,5 +153,86 @@ def _fs_delete(args: dict[str, Any]) -> ToolResult:
             p.unlink(missing_ok=True)
 
         return ToolResult(status="ok", output=f"deleted {p}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _fs_mkdir(args: dict[str, Any]) -> ToolResult:
+    try:
+        p = _safe_rel_path(str(args.get("path", "")))
+        p.mkdir(parents=True, exist_ok=True)
+        return ToolResult(status="ok", output=f"created dir {p}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _fs_copy(args: dict[str, Any]) -> ToolResult:
+    """Copia arquivo ou pasta.
+
+    Args:
+    - src: path relativo (obrigatório)
+    - dst: path relativo (obrigatório)
+    - overwrite: bool (default False)
+    """
+
+    try:
+        src = _safe_rel_path(str(args.get("src", "")))
+        dst = _safe_rel_path(str(args.get("dst", "")))
+        overwrite = bool(args.get("overwrite", False))
+
+        if not src.exists():
+            return ToolResult(status="error", error="src não existe")
+
+        if dst.exists() and not overwrite:
+            return ToolResult(status="error", error="dst já existe (use overwrite=true)")
+
+        if src.is_dir():
+            if dst.exists() and overwrite:
+                # Remove destino antes de copiar.
+                if dst.is_dir():
+                    shutil.rmtree(dst)
+                else:
+                    dst.unlink(missing_ok=True)
+            shutil.copytree(src, dst)
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if dst.exists() and overwrite:
+                dst.unlink(missing_ok=True)
+            shutil.copy2(src, dst)
+
+        return ToolResult(status="ok", output=f"copied {src} -> {dst}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _fs_move(args: dict[str, Any]) -> ToolResult:
+    """Move/renomeia arquivo ou pasta.
+
+    Args:
+    - src: path relativo (obrigatório)
+    - dst: path relativo (obrigatório)
+    - overwrite: bool (default False)
+    """
+
+    try:
+        src = _safe_rel_path(str(args.get("src", "")))
+        dst = _safe_rel_path(str(args.get("dst", "")))
+        overwrite = bool(args.get("overwrite", False))
+
+        if not src.exists():
+            return ToolResult(status="error", error="src não existe")
+
+        if dst.exists() and not overwrite:
+            return ToolResult(status="error", error="dst já existe (use overwrite=true)")
+
+        if dst.exists() and overwrite:
+            if dst.is_dir():
+                shutil.rmtree(dst)
+            else:
+                dst.unlink(missing_ok=True)
+
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+        return ToolResult(status="ok", output=f"moved {src} -> {dst}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))

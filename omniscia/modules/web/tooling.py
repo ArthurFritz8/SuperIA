@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import json
 
 from omniscia.core.config import Settings
 from omniscia.core.tools import ToolRegistry, ToolSpec
@@ -35,6 +36,15 @@ def register_web_tools(registry: ToolRegistry, settings: Settings) -> None:
             description="Tira screenshot de uma URL e salva como PNG (path relativo)",
             risk="MEDIUM",
             fn=lambda args: _web_screenshot(args, settings=settings),
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="web.get_links",
+            description="Extrai links (href + texto) de uma URL (read-only)",
+            risk="MEDIUM",
+            fn=lambda args: _web_get_links(args, settings=settings),
         )
     )
 
@@ -115,5 +125,53 @@ def _web_screenshot(args: dict[str, Any], *, settings: Settings) -> ToolResult:
             browser.close()
 
         return ToolResult(status="ok", output=f"saved screenshot: {path}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _web_get_links(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    ok, err = _require_playwright()
+    if not ok:
+        return ToolResult(status="error", error=err)
+
+    url = str(args.get("url", "")).strip()
+    max_links = int(args.get("max_links", 50) or 50)
+
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ToolResult(status="error", error="url inválida (use http/https)")
+
+    try:
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=settings.web_headless)
+            page = browser.new_page()
+            page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+            anchors = page.query_selector_all("a[href]")
+            links: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for a in anchors:
+                href = (a.get_attribute("href") or "").strip()
+                text = (a.inner_text() or "").strip()
+                if not href:
+                    continue
+
+                # Normaliza para absoluto quando possível.
+                abs_href = page.evaluate(
+                    "(a) => a.href",
+                    a,
+                )
+                abs_href = (abs_href or href or "").strip()
+                if abs_href in seen:
+                    continue
+                seen.add(abs_href)
+                links.append({"href": abs_href, "text": text})
+                if len(links) >= max_links:
+                    break
+
+            browser.close()
+
+        return ToolResult(status="ok", output=json.dumps({"url": url, "links": links}, ensure_ascii=False))
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))

@@ -51,6 +51,15 @@ def register_gui_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         ToolSpec(
+            name="gui.click_box_center",
+            description="Clica no centro de uma caixa (x,y,w,h) (útil com screen.find_text)",
+            risk="HIGH",
+            fn=_gui_click_box_center,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
             name="gui.type_text",
             description="Digita texto no foco atual",
             risk="HIGH",
@@ -81,8 +90,12 @@ def _coerce_xy(args: dict[str, Any], pyautogui) -> tuple[int, int] | None:
         return None
 
     try:
-        x = int(args.get("x"))
-        y = int(args.get("y"))
+        raw_x = args.get("x")
+        raw_y = args.get("y")
+        if raw_x is None or raw_y is None:
+            return None
+        x = int(raw_x)
+        y = int(raw_y)
     except Exception:
         return None
 
@@ -131,6 +144,39 @@ def _gui_click(args: dict[str, Any]) -> ToolResult:
     x, y = xy
     pyautogui.click(x=x, y=y, button="left")
     return ToolResult(status="ok", output=f"clicked ({x},{y})")
+
+
+def _gui_click_box_center(args: dict[str, Any]) -> ToolResult:
+    pyautogui, err = _require_pyautogui()
+    if pyautogui is None:
+        return ToolResult(status="error", error=err)
+
+    try:
+        raw_x = args.get("x")
+        raw_y = args.get("y")
+        raw_w = args.get("w")
+        raw_h = args.get("h")
+        if raw_x is None or raw_y is None or raw_w is None or raw_h is None:
+            return ToolResult(status="error", error="x/y/w/h ausentes")
+        x = int(raw_x)
+        y = int(raw_y)
+        w = int(raw_w)
+        h = int(raw_h)
+    except Exception:
+        return ToolResult(status="error", error="x/y/w/h inválidos")
+
+    if w <= 0 or h <= 0:
+        return ToolResult(status="error", error="w/h devem ser > 0")
+
+    cx = x + (w // 2)
+    cy = y + (h // 2)
+
+    screen_w, screen_h = _screen_size(pyautogui)
+    if cx < 0 or cy < 0 or cx >= screen_w or cy >= screen_h:
+        return ToolResult(status="error", error=f"centro fora da tela (0<=x<{screen_w}, 0<=y<{screen_h})")
+
+    pyautogui.click(x=cx, y=cy, button="left")
+    return ToolResult(status="ok", output=f"clicked box center ({cx},{cy})")
 
 
 def _gui_type_text(args: dict[str, Any]) -> ToolResult:

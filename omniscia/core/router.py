@@ -48,21 +48,42 @@ def route(settings: Settings, user_message: str) -> Plan:
         msg = user_message.strip()
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
 
-    # Fast-path: common desktop opens should not go through LLM.
-    # This both improves UX and avoids blocked dev.exec hallucinations.
-    norm = _normalize(user_message)
-    if re.search(r"\b(abrir|abra|abre|open)\b", norm) and re.search(
-        r"\b(youtube|explorador|explorer|gerenciador de arquivos|calculadora|calculator|calc)\b",
-        norm,
-    ):
-        return _route_heuristic(user_message)
+    # Prefer deterministic heuristics whenever they match.
+    # This improves UX (no latency/quota) and avoids LLM hallucinations.
+    heuristic = _route_heuristic(user_message)
+    deterministic_intents = {
+        # OS openers
+        "os.open_url",
+        "os.open_explorer",
+        "os.open_app",
+        # Filesystem routines
+        "fs.list_dir",
+        "fs.read_text",
+        "fs.delete",
+        "fs.mkdir",
+        "fs.copy",
+        "fs.move",
+        # Vision basics
+        "screen.screenshot",
+        "screen.ocr",
+        # GUI explicit coordinates
+        "gui.get_mouse",
+        "gui.move_mouse",
+        "gui.click",
+        "gui.click_box_center",
+        "gui.type_text",
+        # Web read-only
+        "web.get_page_text",
+    }
+    if heuristic.intent in deterministic_intents:
+        return heuristic
 
     if settings.router_mode == "llm":
         plan = _route_with_llm(settings, user_message)
         if plan is not None:
             return plan
 
-    return _route_heuristic(user_message)
+    return heuristic
 
 
 def _route_heuristic(user_message: str) -> Plan:
@@ -124,6 +145,44 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="screen.ocr", args={})],
             risk=RiskLevel.MEDIUM,
             final_response="Fiz OCR da tela atual.",
+        )
+
+    # Regra: criar pasta (mkdir)
+    m = re.search(r"\b(criar|crie|cria|make|mkdir)\b\s+\b(pasta|diretorio|diret[oó]rio|folder|dir)\b\s*[:]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        path = m.group(3).strip().strip('"').strip("'")
+        return Plan(
+            intent="fs.mkdir",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fs.mkdir", args={"path": path})],
+            risk=RiskLevel.LOW,
+            final_response=f"Ok, criei a pasta: {path}",
+        )
+
+    # Regra: copiar arquivo/pasta
+    m = re.search(r"\b(copiar|copie|copy)\b\s+(.+?)\s+\b(para|pra|to)\b\s+(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        src = m.group(2).strip().strip('"').strip("'")
+        dst = m.group(4).strip().strip('"').strip("'")
+        return Plan(
+            intent="fs.copy",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fs.copy", args={"src": src, "dst": dst, "overwrite": False})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, copiei no workspace.",
+        )
+
+    # Regra: mover/renomear
+    m = re.search(r"\b(mover|mova|move|renomear|renomeie|rename|mv)\b\s+(.+?)\s+\b(para|pra|to)\b\s+(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        src = m.group(2).strip().strip('"').strip("'")
+        dst = m.group(4).strip().strip('"').strip("'")
+        return Plan(
+            intent="fs.move",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fs.move", args={"src": src, "dst": dst, "overwrite": False})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok, movi/renomeei no workspace.",
         )
 
     # Regra: DEV - executar comando (ex: "executar: python -c \"print(2+2)\"")
@@ -427,12 +486,16 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- write_file -> {path, content}\n"
         "- os.open_url -> {url} (apenas http/https)\n"
         "- os.open_explorer -> {path?} (path relativo; default '.')\n"
-        "- os.open_app -> {app} (allowlist: calculator)\n"
+        "- os.open_app -> {app} (allowlist: calculator, notepad, paint, snippingtool)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
         "- web.screenshot -> {url, path?}\n"
+        "- web.get_links -> {url, max_links?}\n"
         "- fs.list_dir -> {path}\n"
         "- fs.read_text -> {path, max_chars}\n"
+        "- fs.mkdir -> {path}\n"
+        "- fs.copy -> {src, dst, overwrite?}\n"
+        "- fs.move -> {src, dst, overwrite?} (pode ser renomear)\n"
         "- fs.delete -> {path} (CRITICAL)\n"
         "- screen.screenshot -> {}\n"
         "- screen.ocr -> {path?}\n"
@@ -440,6 +503,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- gui.get_mouse -> {}\n"
         "- gui.move_mouse -> {x, y}\n"
         "- gui.click -> {x, y} (CRITICAL)\n"
+        "- gui.click_box_center -> {x, y, w, h} (CRITICAL)\n"
         "- gui.type_text -> {text} (CRITICAL)\n"
         "IMPORTANTE: Para abrir sites/apps/pastas, use os.open_url/os.open_explorer/os.open_app (NÃO use dev.exec).\n"
         "IMPORTANTE: Para clicar/digitar na tela, primeiro use screen.find_text para obter coordenadas, depois gui.click/gui.type_text.\n"

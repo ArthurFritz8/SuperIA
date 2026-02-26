@@ -222,6 +222,9 @@ Tool avançada (para automação guiada por tela):
 - `screen.find_text` (via router LLM) procura um texto e devolve caixas `x/y/w/h`.
   Você pode usar isso para achar um botão/label na tela e então chamar `gui.click` com as coordenadas.
 
+Helper (mais direto):
+- `gui.click_box_center` recebe `x/y/w/h` e clica no centro da caixa (ideal junto de `screen.find_text`).
+
 Exemplos de intenção:
 - "ache o texto 'OK' na tela" (usa `screen.find_text`)
 - "clique no botão 'OK'" (tipicamente: `screen.find_text` → `gui.click`, com HITL)
@@ -234,6 +237,20 @@ Para abrir apps comuns sem usar `dev.exec`, use:
 Exemplos:
 - "abre a calculadora"
 - "abre o bloco de notas"
+
+## Rotinas de arquivos (workspace)
+
+Além de listar/ler/apagar, o agente também pode:
+- `fs.mkdir` criar pastas
+- `fs.copy` copiar arquivo/pasta (recursivo)
+- `fs.move` mover/renomear
+
+Obs: tudo é **path relativo** (sem `C:\\` e sem `..`). Por padrão não sobrescreve; use `overwrite=true` quando fizer sentido (vai passar pelo HITL conforme risco).
+
+## Web (read-only)
+
+Além de ler texto e screenshot, existe:
+- `web.get_links` para extrair links (href + texto) de uma página (requer Playwright).
 
 ## DevAgent (Programador Interno) — MVP
 

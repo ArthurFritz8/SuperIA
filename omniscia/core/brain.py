@@ -213,13 +213,23 @@ def _normalize_tool_args(tool_name: str, args: dict, *, settings: Settings) -> t
         return s
 
     # Paths comuns
-    if tool_name in {"write_file", "fs.list_dir", "fs.read_text", "fs.delete"} and "path" in a:
+    if tool_name in {"write_file", "fs.list_dir", "fs.read_text", "fs.delete", "fs.mkdir"} and "path" in a:
         before = a.get("path")
         after = norm_path(before)
         if before != after:
             a["path"] = after
             did = True
             note_parts.append("path normalized")
+
+    if tool_name in {"fs.copy", "fs.move"}:
+        for key in ("src", "dst"):
+            if key in a:
+                before = a.get(key)
+                after = norm_path(before)
+                if before != after:
+                    a[key] = after
+                    did = True
+                    note_parts.append(f"{key} normalized")
 
     if tool_name == "screen.ocr" and "image_path" in a and a.get("image_path") is not None:
         before = a.get("image_path")
