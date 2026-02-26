@@ -36,3 +36,15 @@ def test_router_jgrasp_project_on_desktop_uses_desktop_prefix():
     assert plan.risk == RiskLevel.HIGH
     assert [c.tool_name for c in plan.tool_calls] == ["os.open_app", "jgrasp.create_java_program"]
     assert str(plan.tool_calls[1].args.get("path", "")).lower().startswith("desktop:/")
+
+
+def test_router_jgrasp_matrix_is_deterministic_and_uses_code():
+    settings = Settings(router_mode="heuristic")
+    plan = route(settings, "ja estou com jgrasp aberto, escreva um codigo de matriz totalmente funcional")
+    assert plan.intent == "jgrasp.create_java_program"
+    assert plan.risk == RiskLevel.HIGH
+    assert [c.tool_name for c in plan.tool_calls] == ["os.open_app", "jgrasp.create_java_program"]
+    assert plan.tool_calls[1].args.get("class_name") == "Matriz"
+    code = str(plan.tool_calls[1].args.get("code", ""))
+    assert "class Matriz" in code
+    assert "static void main" in code

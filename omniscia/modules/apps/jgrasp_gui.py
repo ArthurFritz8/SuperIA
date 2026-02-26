@@ -18,6 +18,7 @@ from __future__ import annotations
 import sys
 import time
 from pathlib import Path
+import re
 from typing import Any
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
@@ -34,7 +35,7 @@ def register_jgrasp_tools(registry: ToolRegistry) -> None:
                 "Cria um arquivo .java funcional e abre no jGRASP (Ctrl+O). "
                 "Por padrão, cria no workspace (path relativo). Também aceita path com prefixo "
                 "desktop:/..., documents:/..., downloads:/... ou path absoluto (com guardrails). "
-                "Args: path?, class_name?, message?, open_in_jgrasp?, settle_ms?"
+                "Args: path?, class_name?, message?, code?, open_in_jgrasp?, settle_ms?"
             ),
             risk="HIGH",
             fn=_jgrasp_create_java_program,
@@ -160,13 +161,78 @@ def _java_hello_world(class_name: str, message: str) -> str:
     )
 
 
+def _sanitize_java_class_name(raw: str, *, fallback: str = "HelloWorld") -> str:
+    cn = "".join(ch for ch in (raw or "") if ch.isalnum() or ch == "_")
+    if not cn or cn[0].isdigit():
+        return fallback
+    return cn
+
+
+def _looks_like_java_source(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    # Heurística: o LLM às vezes manda o código inteiro em `message`.
+    if "\n" not in t and "\r" not in t:
+        return False
+    if not re.search(r"\bclass\b", t):
+        return False
+    if not re.search(r"\bstatic\s+void\s+main\b", t):
+        return False
+    return True
+
+
+def _java_matrix_demo(class_name: str) -> str:
+    cn = _sanitize_java_class_name(class_name, fallback="Matriz")
+    return (
+        f"public class {cn} {{\n"
+        "    public static void main(String[] args) {\n"
+        "        int linhas = 3;\n"
+        "        int colunas = 3;\n"
+        "        int[][] matriz = new int[linhas][colunas];\n\n"
+        "        // Preenche com um padrão simples\n"
+        "        for (int i = 0; i < linhas; i++) {\n"
+        "            for (int j = 0; j < colunas; j++) {\n"
+        "                matriz[i][j] = (i + 1) * (j + 1);\n"
+        "            }\n"
+        "        }\n\n"
+        "        // Imprime a matriz\n"
+        "        System.out.println(\"Matriz 3x3:\");\n"
+        "        for (int i = 0; i < linhas; i++) {\n"
+        "            for (int j = 0; j < colunas; j++) {\n"
+        "                System.out.print(matriz[i][j] + \"\\t\");\n"
+        "            }\n"
+        "            System.out.println();\n"
+        "        }\n\n"
+        "        // Soma dos elementos\n"
+        "        int soma = 0;\n"
+        "        for (int i = 0; i < linhas; i++) {\n"
+        "            for (int j = 0; j < colunas; j++) {\n"
+        "                soma += matriz[i][j];\n"
+        "            }\n"
+        "        }\n"
+        "        System.out.println(\"Soma = \" + soma);\n"
+        "    }\n"
+        "}\n"
+    )
+
+
 def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
     if not sys.platform.startswith("win"):
         return ToolResult(status="error", error="jgrasp.create_java_program suporta apenas Windows")
 
-    path_raw = str(args.get("path", "scratch/HelloWorld.java") or "scratch/HelloWorld.java")
     class_name = str(args.get("class_name", "HelloWorld") or "HelloWorld").strip()
-    message = str(args.get("message", "Olá, mundo!") or "Olá, mundo!").strip()
+    class_name = _sanitize_java_class_name(class_name, fallback="HelloWorld")
+
+    # Se path não vier, derive do nome da classe (melhor que sempre HelloWorld.java).
+    path_raw = str(args.get("path", "") or "").strip()
+    if not path_raw:
+        path_raw = f"scratch/{class_name}.java"
+
+    message = str(args.get("message", "Olá, mundo!") or "Olá, mundo!")
+    raw_code = args.get("code")
+    code_arg = str(raw_code) if raw_code is not None else ""
+
     open_in_jgrasp = bool(args.get("open_in_jgrasp", True))
     settle_ms = int(args.get("settle_ms", 900) or 900)
 
@@ -177,9 +243,22 @@ def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
 
     # Garanta que o nome da classe combina com o nome do arquivo quando possível.
     if abs_path.stem and (not class_name or class_name.lower() == "helloworld"):
-        class_name = abs_path.stem
+        class_name = _sanitize_java_class_name(abs_path.stem, fallback="HelloWorld")
 
-    code = _java_hello_world(class_name=class_name, message=message)
+    # Conteúdo do arquivo:
+    # - Preferir `code` quando fornecido
+    # - Se `message` parece código Java, tratar como `code` (compatibilidade com planos antigos/LLM)
+    # - Caso contrário, gerar HelloWorld imprimindo `message`
+    code: str
+    if code_arg.strip():
+        code = code_arg
+    elif _looks_like_java_source(message):
+        code = message
+    else:
+        code = _java_hello_world(class_name=class_name, message=str(message).strip())
+
+    if not code.endswith("\n"):
+        code += "\n"
 
     try:
         abs_path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,9 +285,25 @@ def _jgrasp_create_java_program(args: dict[str, Any]) -> ToolResult:
 
     # Abre o diálogo de Open.
     pyautogui.hotkey("ctrl", "o")
-    time.sleep(0.35)
+    time.sleep(0.2)
 
-    # Digita o caminho absoluto no campo de nome do arquivo e confirma.
+    # IMPORTANTE: só digite o caminho se detectarmos o diálogo Abrir/Open.
+    # Caso contrário, digitar aqui suja o editor com o path.
+    dlg = focus_window_by_title_contains("abrir", timeout_s=1.2, visible_only=True)
+    if not dlg:
+        dlg = focus_window_by_title_contains("open", timeout_s=1.2, visible_only=True)
+    if not dlg:
+        return ToolResult(
+            status="error",
+            error=(
+                "diálogo 'Abrir/Open' não detectado após Ctrl+O; "
+                f"arquivo já foi criado em {display_path} mas não digitei nada para não sujar o editor"
+            ),
+        )
+
+    time.sleep(0.1)
+    pyautogui.hotkey("ctrl", "a")
+    time.sleep(0.05)
     pyautogui.write(str(abs_path), interval=0.01)
     time.sleep(0.1)
     pyautogui.press("enter")

@@ -22,3 +22,6 @@ build/
 /data/screenshots/
 /data/tmp/
 /data/memory/
+
+# Scratch (gerado por automações)
+scratch/

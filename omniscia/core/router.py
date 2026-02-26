@@ -235,6 +235,68 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
 
+    # Regra: código de matriz no jGRASP (determinístico; evita LLM enfiar código em `message`)
+    if "jgrasp" in norm and re.search(r"\b(matriz|matrix)\b", norm):
+        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
+            wants_desktop = bool(re.search(r"\b(área de trabalho|area de trabalho|desktop)\b", norm))
+
+            class_name = "Matriz"
+            path = f"scratch/{class_name}.java"
+            if wants_desktop:
+                path = f"desktop:/{class_name}/{class_name}.java"
+
+            code = (
+                "public class Matriz {\n"
+                "    public static void main(String[] args) {\n"
+                "        int linhas = 3;\n"
+                "        int colunas = 3;\n"
+                "        int[][] matriz = new int[linhas][colunas];\n\n"
+                "        // Preenche com um padrão simples\n"
+                "        for (int i = 0; i < linhas; i++) {\n"
+                "            for (int j = 0; j < colunas; j++) {\n"
+                "                matriz[i][j] = (i + 1) * (j + 1);\n"
+                "            }\n"
+                "        }\n\n"
+                "        // Imprime a matriz\n"
+                "        System.out.println(\"Matriz 3x3:\");\n"
+                "        for (int i = 0; i < linhas; i++) {\n"
+                "            for (int j = 0; j < colunas; j++) {\n"
+                "                System.out.print(matriz[i][j] + \"\\t\");\n"
+                "            }\n"
+                "            System.out.println();\n"
+                "        }\n\n"
+                "        // Soma dos elementos\n"
+                "        int soma = 0;\n"
+                "        for (int i = 0; i < linhas; i++) {\n"
+                "            for (int j = 0; j < colunas; j++) {\n"
+                "                soma += matriz[i][j];\n"
+                "            }\n"
+                "        }\n"
+                "        System.out.println(\"Soma = \" + soma);\n"
+                "    }\n"
+                "}\n"
+            )
+
+            return Plan(
+                intent="jgrasp.create_java_program",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="os.open_app", args={"app": "jgrasp"}),
+                    ToolCall(
+                        tool_name="jgrasp.create_java_program",
+                        args={
+                            "path": path,
+                            "class_name": class_name,
+                            "code": code,
+                            "open_in_jgrasp": True,
+                            "settle_ms": 900,
+                        },
+                    ),
+                ],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou criar um código Java de matriz no jGRASP (requer aprovação).",
+            )
+
     # Regra: criar um programa/projeto no jGRASP (cria arquivo Java e abre no jGRASP)
     if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
         if re.search(r"\b(programa|projeto|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
@@ -723,7 +785,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- os.open_app -> {app} (allowlist configurável via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON; exemplos: calculator, notepad, paint, snippingtool, discord)\n"
         "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows; retorna rect)\n"
         "- discord.send_message -> {to, message, settle_ms?} (CRITICAL; requer Discord em foco)\n"
-        "- jgrasp.create_java_program -> {path?, class_name?, message?, open_in_jgrasp?, settle_ms?} (HIGH; cria .java no workspace e abre no jGRASP)\n"
+        "- jgrasp.create_java_program -> {path?, class_name?, message?, code?, open_in_jgrasp?, settle_ms?} (HIGH; cria .java e abre no jGRASP; use code para conteúdo completo)\n"
         "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)\n"
         "- memory.search -> {query, limit}\n"
         "- web.get_page_text -> {url, max_chars}\n"
