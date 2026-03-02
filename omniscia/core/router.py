@@ -101,84 +101,115 @@ def route(settings: Settings, user_message: str) -> Plan:
         return heuristic
 
     if settings.router_mode == "llm":
-        plan = _route_with_llm(settings, user_message)
+        plan = route_llm(settings, user_message, heuristic_fallback=heuristic)
         if plan is not None:
-            # Guardrail: não execute automação/visão a menos que o usuário peça explicitamente.
-            # Motivação: perguntas de orientação (ex: jogos) devem ser respondidas em texto.
-            norm = _normalize(user_message)
-
-            def _asked_for_screen_or_gui(n: str) -> bool:
-                # IMPORTANTE: não basta mencionar "tela".
-                # Ex.: "na minha tela apareceu..." NÃO é pedido pra usar OCR/screenshot.
-                # Só libera tools quando houver pedido explícito (imperativo) ou ação (clicar/digitar).
-
-                # Pedidos explícitos de clique/teclado.
-                if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite)\b", n):
-                    return True
-
-                # Pedidos explícitos de screenshot/OCR.
-                if re.search(
-                    r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
-                    n,
-                ):
-                    return True
-
-                # Imperativo + tela/screen.
-                # Evita regex frágil: basta ter verbo de pedido + palavra tela/screen.
-                has_imperative = bool(
-                    re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n)
-                )
-                has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
-                return has_imperative and has_screen_word
-
-            def _asked_for_dev_exec(n: str) -> bool:
-                return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
-
-            asked_screen_or_gui = _asked_for_screen_or_gui(norm)
-            asked_dev = _asked_for_dev_exec(norm)
-
-            def _has_forbidden_tools(p: Plan) -> bool:
-                for c in p.tool_calls:
-                    name = (c.tool_name or "").strip()
-                    if name.startswith(("screen.", "gui.")) or name in {"win.focus_window"}:
-                        if not asked_screen_or_gui:
-                            return True
-                    if name.startswith("dev.") and not asked_dev:
-                        return True
-                return False
-
-            if _has_forbidden_tools(plan):
-                # Tenta uma segunda vez instruindo explicitamente a responder só em texto.
-                no_tools_msg = (
-                    user_message
-                    + "\n\nIMPORTANTE: o usuário NÃO pediu para ver/clicar na tela nem executar comandos. "
-                    + "Responda APENAS com orientação em texto, tool_calls=[] e risk=LOW."
-                )
-                plan2 = _route_with_llm(settings, no_tools_msg)
-                if plan2 is not None and not _has_forbidden_tools(plan2) and (plan2.final_response or "").strip():
-                    plan = plan2
-                else:
-                    # Fallback final: zera tools e devolve resposta textual (se existir).
-                    plan = plan.model_copy(
-                        update={
-                            "intent": "chat",
-                            "risk": RiskLevel.LOW,
-                            "tool_calls": [],
-                            "final_response": (plan.final_response or "").strip()
-                            or "Posso te orientar em texto. Me diga qual Pokémon é, seu level e quais golpes ele já tem.",
-                        }
-                    )
-
-            # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
-            if any((c.tool_name or "").startswith("discord.") for c in plan.tool_calls):
-                asked_discord = "discord" in norm
-                asked_message = bool(re.search(r"\b(mensagem|msg|chat)\b", norm))
-                if not (asked_discord and asked_message):
-                    logger.warning("LLM plan attempted Discord tools without explicit user request; falling back to heuristic")
-                    return heuristic
             return plan
 
     return heuristic
+
+
+def route_llm(
+    settings: Settings,
+    user_message: str,
+    *,
+    context_messages: list[dict[str, str]] | None = None,
+    heuristic_fallback: Plan | None = None,
+) -> Plan | None:
+    """Roteia via LLM (quando configurado), opcionalmente com contexto adicional.
+
+    Uso:
+    - `route()` chama isso para o primeiro plano em modo llm.
+    - O loop ReAct pode chamar isso novamente após tool outputs, passando `context_messages`.
+
+    Observação:
+    - `context_messages` deve conter apenas roles "user"/"assistant".
+    - Guardrails de segurança são aplicados aqui.
+    """
+
+    plan = _route_with_llm_messages(
+        settings,
+        (context_messages or []) + [{"role": "user", "content": str(user_message or "").strip()}],
+    )
+    if plan is None:
+        return None
+
+    norm = _normalize(user_message)
+
+    def _asked_for_screen_or_gui(n: str) -> bool:
+        # IMPORTANTE: não basta mencionar "tela".
+        # Ex.: "na minha tela apareceu..." NÃO é pedido pra usar OCR/screenshot.
+        # Só libera tools quando houver pedido explícito (imperativo) ou ação (clicar/digitar).
+
+        # Pedidos explícitos de clique/teclado.
+        if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite)\b", n):
+            return True
+
+        # Pedidos explícitos de screenshot/OCR.
+        if re.search(
+            r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
+            n,
+        ):
+            return True
+
+        # Imperativo + tela/screen.
+        has_imperative = bool(
+            re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n)
+        )
+        has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
+        return has_imperative and has_screen_word
+
+    def _asked_for_dev_exec(n: str) -> bool:
+        return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
+
+    asked_screen_or_gui = _asked_for_screen_or_gui(norm)
+    asked_dev = _asked_for_dev_exec(norm)
+
+    def _has_forbidden_tools(p: Plan) -> bool:
+        for c in p.tool_calls:
+            name = (c.tool_name or "").strip()
+            if name.startswith(("screen.", "gui.")) or name in {"win.focus_window"}:
+                if not asked_screen_or_gui:
+                    return True
+            if name.startswith("dev.") and not asked_dev:
+                return True
+        return False
+
+    if _has_forbidden_tools(plan):
+        # Tenta uma segunda vez instruindo explicitamente a responder só em texto.
+        no_tools_msg = (
+            user_message
+            + "\n\nIMPORTANTE: o usuário NÃO pediu para ver/clicar na tela nem executar comandos. "
+            + "Responda APENAS com orientação em texto, tool_calls=[] e risk=LOW."
+        )
+        plan2 = _route_with_llm_messages(
+            settings,
+            (context_messages or []) + [{"role": "user", "content": no_tools_msg}],
+        )
+        if plan2 is not None and not _has_forbidden_tools(plan2) and (plan2.final_response or "").strip():
+            plan = plan2
+        else:
+            # Fallback final: zera tools e devolve resposta textual (se existir).
+            plan = plan.model_copy(
+                update={
+                    "intent": "chat",
+                    "risk": RiskLevel.LOW,
+                    "tool_calls": [],
+                    "final_response": (plan.final_response or "").strip()
+                    or "Posso te orientar em texto. Me diga o que você quer fazer e com quais detalhes.",
+                }
+            )
+
+    # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
+    if any((c.tool_name or "").startswith("discord.") for c in plan.tool_calls):
+        asked_discord = "discord" in norm
+        asked_message = bool(re.search(r"\b(mensagem|msg|chat)\b", norm))
+        if not (asked_discord and asked_message):
+            logger.warning("LLM plan attempted Discord tools without explicit user request; falling back")
+            if heuristic_fallback is not None:
+                return heuristic_fallback
+            return Plan(intent="chat", user_message=user_message.strip(), tool_calls=[], risk=RiskLevel.LOW, final_response="Posso ajudar em texto. Se você quiser mesmo enviar mensagem no Discord, diga explicitamente o destinatário e a mensagem.")
+
+    return plan
 
 
 def _route_heuristic(user_message: str) -> Plan:
@@ -245,38 +276,8 @@ def _route_heuristic(user_message: str) -> Plan:
         )[0].strip()
         return tail.strip().strip('"').strip("'")
 
-    def _matrix_java_code() -> str:
-        return (
-            "public class Matriz {\n"
-            "    public static void main(String[] args) {\n"
-            "        int linhas = 3;\n"
-            "        int colunas = 3;\n"
-            "        int[][] matriz = new int[linhas][colunas];\n\n"
-            "        // Preenche com um padrão simples\n"
-            "        for (int i = 0; i < linhas; i++) {\n"
-            "            for (int j = 0; j < colunas; j++) {\n"
-            "                matriz[i][j] = (i + 1) * (j + 1);\n"
-            "            }\n"
-            "        }\n\n"
-            "        // Imprime a matriz\n"
-            "        System.out.println(\"Matriz 3x3:\");\n"
-            "        for (int i = 0; i < linhas; i++) {\n"
-            "            for (int j = 0; j < colunas; j++) {\n"
-            "                System.out.print(matriz[i][j] + \"\\t\");\n"
-            "            }\n"
-            "            System.out.println();\n"
-            "        }\n\n"
-            "        // Soma dos elementos\n"
-            "        int soma = 0;\n"
-            "        for (int i = 0; i < linhas; i++) {\n"
-            "            for (int j = 0; j < colunas; j++) {\n"
-            "                soma += matriz[i][j];\n"
-            "            }\n"
-            "        }\n"
-            "        System.out.println(\"Soma = \" + soma);\n"
-            "    }\n"
-            "}\n"
-        )
+    # NOTA: geração de código (ex.: exemplos completos de Java) é responsabilidade do modo LLM.
+    # No modo heurístico, preferimos não chutar código nem “enfiar” templates fixos.
 
     # Regra: screenshot
     is_screenshot = bool(
@@ -402,189 +403,33 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
 
-    # Regra: modificar/apagar o código e fazer uma matriz (substitui o editor atual no jGRASP)
-    # Ex: "modifique o codigo, apague o codigo e faça uma matriz agora"
-    if re.search(r"\b(matriz|matrix)\b", norm) and re.search(r"\b(codigo|editor)\b", norm):
-        if re.search(
-            r"\b(modificar|modifique|alterar|altere|editar|edite|apagar|apague|limpar|limpe|substituir|substitua|trocar|troque|remover|remova)\b",
-            norm,
-        ):
-            code = _matrix_java_code()
+    # Regra: pedidos de geração de código (matriz/matemática/etc.)
+    # - Em modo heurístico: não chutamos templates fixos.
+    # - Em modo llm: a heurística retorna chat (não determinístico) e o `route()` chama o LLM.
+    if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
+        wants_code = bool(re.search(r"\b(c[oó]digo|codigo)\b", norm))
+        wants_jgrasp = ("jgrasp" in norm)
+        wants_matrix_math = bool(re.search(r"\b(matriz|matrix|matem[aá]tica|matematica|math)\b", norm))
+        wants_conta_math = bool(re.search(r"\bconta\b", norm)) and not bool(
+            re.search(r"\b(login|senha|email|e-mail|conta\s+banc[aá]ria|banco|cadastro|registrar)\b", norm)
+        )
+
+        if wants_code and (wants_matrix_math or (wants_jgrasp and wants_conta_math) or (wants_matrix_math and not wants_jgrasp)):
             return Plan(
-                intent="jgrasp.write_code",
+                intent="chat",
                 user_message=msg,
-                tool_calls=[
-                    ToolCall(
-                        tool_name="jgrasp.write_code",
-                        args={
-                            "code": code,
-                            "select_all": True,
-                            "settle_ms": 700,
-                        },
-                    )
-                ],
-                risk=RiskLevel.HIGH,
-                final_response="Ok — vou substituir o código no editor do jGRASP por um exemplo de matriz (requer aprovação).",
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response=(
+                    "Consigo gerar esse código, mas no modo heurístico eu não uso templates fixos. "
+                    "Ative o modo LLM (OMNI_ROUTER_MODE=llm) e repita o pedido, ou descreva exatamente o que o programa deve fazer "
+                    "(entradas, saídas e restrições) que eu te guio passo a passo."
+                ),
             )
 
-    # Regra: código de matriz no jGRASP (determinístico; evita LLM enfiar código em `message`)
-    if "jgrasp" in norm and re.search(r"\b(matriz|matrix)\b", norm):
-        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
-            wants_desktop = bool(re.search(r"\b(área de trabalho|area de trabalho|desktop)\b", norm))
-
-            class_name = "Matriz"
-            path = f"scratch/{class_name}.java"
-            if wants_desktop:
-                path = f"desktop:/{class_name}/{class_name}.java"
-
-            code = _matrix_java_code()
-
-            return Plan(
-                intent="jgrasp.create_java_program",
-                user_message=msg,
-                tool_calls=[
-                    ToolCall(tool_name="os.open_app", args={"app": "jgrasp"}),
-                    ToolCall(
-                        tool_name="jgrasp.create_java_program",
-                        args={
-                            "path": path,
-                            "class_name": class_name,
-                            "code": code,
-                            "open_in_jgrasp": True,
-                            "settle_ms": 900,
-                        },
-                    ),
-                ],
-                risk=RiskLevel.HIGH,
-                final_response="Ok — vou criar um código Java de matriz no jGRASP (requer aprovação).",
-            )
-
-    # Regra: código de matemática no jGRASP (sem criar arquivo; cola no editor)
-    if "jgrasp" in norm and re.search(r"\b(matem[aá]tica|matematica|math)\b", norm):
-        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
-            code = (
-                "import java.util.Scanner;\n\n"
-                "public class MatematicaDemo {\n"
-                "    static long fatorial(int n) {\n"
-                "        long r = 1;\n"
-                "        for (int i = 2; i <= n; i++) r *= i;\n"
-                "        return r;\n"
-                "    }\n\n"
-                "    static boolean ehPrimo(int n) {\n"
-                "        if (n < 2) return false;\n"
-                "        if (n % 2 == 0) return n == 2;\n"
-                "        for (int d = 3; d * d <= n; d += 2) {\n"
-                "            if (n % d == 0) return false;\n"
-                "        }\n"
-                "        return true;\n"
-                "    }\n\n"
-                "    static int mdc(int a, int b) {\n"
-                "        a = Math.abs(a);\n"
-                "        b = Math.abs(b);\n"
-                "        while (b != 0) {\n"
-                "            int t = a % b;\n"
-                "            a = b;\n"
-                "            b = t;\n"
-                "        }\n"
-                "        return a;\n"
-                "    }\n\n"
-                "    public static void main(String[] args) {\n"
-                "        Scanner sc = new Scanner(System.in);\n"
-                "        System.out.print(\"Digite um inteiro n (0..20): \");\n"
-                "        int n = sc.nextInt();\n"
-                "        if (n < 0) n = 0;\n"
-                "        if (n > 20) n = 20;\n"
-                "        System.out.println(\"fatorial(n) = \" + fatorial(n));\n"
-                "        System.out.println(\"n é primo? \" + (ehPrimo(n) ? \"sim\" : \"não\"));\n\n"
-                "        System.out.print(\"Digite a e b para MDC: \");\n"
-                "        int a = sc.nextInt();\n"
-                "        int b = sc.nextInt();\n"
-                "        System.out.println(\"mdc(a,b) = \" + mdc(a, b));\n"
-                "        sc.close();\n"
-                "    }\n"
-                "}\n"
-            )
-
-            return Plan(
-                intent="jgrasp.write_code",
-                user_message=msg,
-                tool_calls=[
-                    ToolCall(
-                        tool_name="jgrasp.write_code",
-                        args={
-                            "code": code,
-                            "select_all": True,
-                            "settle_ms": 700,
-                        },
-                    )
-                ],
-                risk=RiskLevel.HIGH,
-                final_response="Ok — vou escrever o código no editor do jGRASP (requer aprovação).",
-            )
-
-    # Regra: "conta" no jGRASP = conta de matemática (evita LLM inventar 'conta/login')
-    if "jgrasp" in norm and re.search(r"\bconta\b", norm):
-        if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
-            # Se o usuário mencionar login/senha/email, isso NÃO é matemática.
-            if re.search(r"\b(login|senha|email|e-mail|conta bancaria|banco|cadastro|registrar)\b", norm):
-                # Sem regra determinística: deixa o fluxo padrão (provavelmente LLM/heurística genérica).
-                pass
-            else:
-                code = (
-                    "import java.util.Scanner;\n\n"
-                    "public class ContaMatematica {\n"
-                    "    public static void main(String[] args) {\n"
-                    "        Scanner sc = new Scanner(System.in);\n"
-                    "        System.out.print(\"Digite A: \");\n"
-                    "        double a = sc.nextDouble();\n"
-                    "        System.out.print(\"Digite operador (+ - * /): \");\n"
-                    "        String op = sc.next();\n"
-                    "        System.out.print(\"Digite B: \");\n"
-                    "        double b = sc.nextDouble();\n\n"
-                    "        double r;\n"
-                    "        switch (op) {\n"
-                    "            case \"+\": r = a + b; break;\n"
-                    "            case \"-\": r = a - b; break;\n"
-                    "            case \"*\": r = a * b; break;\n"
-                    "            case \"/\":\n"
-                    "                if (b == 0) {\n"
-                    "                    System.out.println(\"Divisão por zero não é permitida.\");\n"
-                    "                    sc.close();\n"
-                    "                    return;\n"
-                    "                }\n"
-                    "                r = a / b;\n"
-                    "                break;\n"
-                    "            default:\n"
-                    "                System.out.println(\"Operador inválido.\");\n"
-                    "                sc.close();\n"
-                    "                return;\n"
-                    "        }\n\n"
-                    "        System.out.println(\"Resultado = \" + r);\n"
-                    "        sc.close();\n"
-                    "    }\n"
-                    "}\n"
-                )
-
-                return Plan(
-                    intent="jgrasp.write_code",
-                    user_message=msg,
-                    tool_calls=[
-                        ToolCall(
-                            tool_name="jgrasp.write_code",
-                            args={
-                                "code": code,
-                                "select_all": True,
-                                "settle_ms": 700,
-                            },
-                        )
-                    ],
-                    risk=RiskLevel.HIGH,
-                    final_response="Ok — vou escrever um código de conta de matemática no editor do jGRASP (requer aprovação).",
-                )
-
-    # Regra: criar um programa/projeto no jGRASP (cria arquivo Java e abre no jGRASP)
+    # Regra: criar um programa/projeto simples no jGRASP (fallback determinístico)
     if "jgrasp" in norm and re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
-        if re.search(r"\b(programa|projeto|codigo|codigos|c[oó]digo|c[oó]digos)\b", norm):
+        if re.search(r"\b(programa|projeto)\b", norm) and re.search(r"\b(simples|hello\s*world|ol[aá]\s*,?\s*mundo)\b", norm):
             # Se o usuário pedir explicitamente para salvar na Área de Trabalho, use o prefixo desktop:/
             # (a tool do jGRASP aplica guardrails e resolve com Known Folders).
             wants_desktop = bool(
@@ -1091,6 +936,16 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
     - Se config estiver ausente, retornamos None e caímos no heurístico.
     """
 
+    return _route_with_llm_messages(settings, [{"role": "user", "content": str(user_message or "").strip()}])
+
+
+def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]]) -> Plan | None:
+    """Usa LLM para produzir um Plan em JSON, aceitando histórico curto.
+
+    `messages` deve ser uma lista no formato OpenAI: {role, content}.
+    Roles aceitas aqui: system/user/assistant.
+    """
+
     from omniscia.core.litellm_env import provider_requires_api_key
 
     needs_key = provider_requires_api_key(settings.llm_provider)
@@ -1120,6 +975,8 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "REGRAS DE RISCO:\n"
         "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
         "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
+        "CONTEXTO (IMPORTANTE):\n"
+        "- Você pode receber mensagens anteriores com resultados de tools (ex.: 'TOOL_RESULT ...'). Use isso para decidir próximos passos.\n\n"
         "REGRA MAIS IMPORTANTE (NÃO INVENTE AUTOMAÇÃO):\n"
         "- Se o usuário pediu apenas orientação/explicação/dicas (ex: jogos, estudo, dúvidas), responda em texto: tool_calls=[] e risk=LOW.\n"
         "- Só use tools de tela (screen.*), janela (win.focus_window) ou GUI (gui.* / screen.click_text) quando o usuário pedir explicitamente para ver/clicar/digitar na tela.\n"
@@ -1127,6 +984,13 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- Nunca adivinhe window_title: só preencha window_title se o usuário fornecer o texto do título (ou substring) na mensagem.\n\n"
         "REGRAS ESPECÍFICAS:\n"
         "- Se usar discord.send_message, inclua antes um os.open_app com app='discord' para garantir que o Discord esteja aberto/em foco.\n\n"
+        "- jGRASP (MUITO IMPORTANTE):\n"
+        "  - Se o usuário pedir um programa/código Java 'funcional', 'completo', 'de matriz', 'de matemática', etc., use jgrasp.create_java_program OU jgrasp.write_code com o campo code (NÃO use apenas message).\n"
+        "  - O campo code deve conter Java compilável, sem markdown e sem cercas de código (```), e a classe pública deve bater com class_name.\n"
+        "  - Defaults: path='scratch/<ClassName>.java' e class_name='<ClassName>' (PascalCase).\n"
+        "  - Só use path com prefixo 'desktop:/' quando o usuário pedir explicitamente 'Área de Trabalho/desktop'.\n"
+        "  - Se o usuário disser que o jGRASP já está aberto e/ou que não precisa criar arquivo, prefira jgrasp.write_code com select_all=true (substitui o editor atual).\n"
+        "  - Se houver TOOL_RESULT indicando falha por foco/timing, ajuste settle_ms para mais alto (ex.: 1200) e garanta os.open_app('jgrasp') antes.\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
         "- core.show_settings -> {}\n"
         "- core.list_tools -> {}\n"
@@ -1167,15 +1031,7 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "- dev.autofix_cmd -> {command, max_iters, timeout_s} (apenas pytest)\\n"
     )
 
-    llm_provider = settings.llm_provider
     llm_model = settings.llm_model
-    llm_api_key = settings.llm_api_key
-    from omniscia.core.litellm_env import provider_requires_api_key
-
-    needs_key = provider_requires_api_key(llm_provider)
-    has_key = bool((llm_api_key or "").strip())
-    if not (llm_provider and llm_model and (has_key or not needs_key)):
-        return None
 
     # Não logamos a key; só configuramos no ambiente do litellm.
     from omniscia.core.litellm_env import apply_litellm_env
@@ -1183,14 +1039,17 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
     apply_litellm_env(settings)
 
     try:
-        resp = completion(
-            model=llm_model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.0,
-        )
+        clean_msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+        for m in messages:
+            role = str((m or {}).get("role") or "").strip().lower()
+            content = str((m or {}).get("content") or "")
+            if role in {"user", "assistant", "system"} and content.strip():
+                # Nunca deixamos o caller substituir o system principal.
+                if role == "system":
+                    role = "assistant"
+                clean_msgs.append({"role": role, "content": content})
+
+        resp = completion(model=llm_model, messages=clean_msgs, temperature=0.0)
 
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
 

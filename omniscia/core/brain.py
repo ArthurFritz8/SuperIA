@@ -25,7 +25,7 @@ from rich.panel import Panel
 
 from omniscia.core.config import Settings
 from omniscia.core.hitl import require_approval
-from omniscia.core.router import route
+from omniscia.core.router import route, route_llm
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
@@ -155,7 +155,12 @@ def run_brain_loop(settings: Settings) -> None:
             )
             continue
 
-        response_text = _execute_plan(console, settings, registry, plan, memory)
+        # ReAct (modo llm): executa tools em um loop e replaneja com base nos outputs.
+        # No modo heurístico, mantemos execução linear de um plano fixo.
+        if settings.router_mode == "llm" and plan.tool_calls:
+            response_text = _execute_plan_react(console, settings, registry, plan, memory)
+        else:
+            response_text = _execute_plan(console, settings, registry, plan, memory)
         if tts.enabled and response_text:
             # Evita falar textos gigantes acidentalmente.
             t = response_text.strip()
@@ -171,7 +176,7 @@ def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) 
     """Monta um histórico curto para dar contexto ao chat.
 
     Observações:
-    - Usamos apenas user_message/agent_response para não poluir com tool outputs.
+    - Incluímos um resumo truncado de tool outputs para dar contexto real ao LLM.
     - Limitamos o tamanho para reduzir custo/latência.
     """
 
@@ -193,11 +198,118 @@ def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) 
             t = str((e.payload or {}).get("text", "") or "").strip()
             if t:
                 msgs.append({"role": "assistant", "content": t})
+        elif e.kind == "tool_output":
+            tool = str((e.payload or {}).get("tool", "") or "").strip()
+            status = str((e.payload or {}).get("status", "") or "").strip()
+            output = str((e.payload or {}).get("output", "") or "").strip()
+            error = str((e.payload or {}).get("error", "") or "").strip()
+
+            text = f"TOOL_RESULT {tool} status={status}"
+            if output:
+                out = output
+                if len(out) > 800:
+                    out = out[:800] + "\n... [truncado]"
+                text += "\nOUTPUT:\n" + out
+            if error:
+                err = error
+                if len(err) > 500:
+                    err = err[:500] + "... [truncado]"
+                text += "\nERROR:\n" + err
+
+            if tool:
+                msgs.append({"role": "assistant", "content": text})
 
     # Mantém apenas o rastro mais recente.
     if len(msgs) > 10:
         msgs = msgs[-10:]
     return msgs
+
+
+def _is_side_effect_tool(name: str) -> bool:
+    # Heurística conservadora: ferramentas que podem causar efeitos no SO.
+    # Retrys dessas ferramentas ficam desabilitados por padrão.
+    return bool(
+        name.startswith(
+            (
+                "gui.",
+                "discord.",
+                "jgrasp.",
+                "dev.",
+                "fs.delete",
+                "fs.move",
+                "fs.copy",
+                "write_file",
+                "screen.click_text",
+            )
+        )
+        or name in {"os.open_app", "os.close_app", "os.open_url"}
+    )
+
+
+def _should_retry(settings: Settings, tool_name: str, err: str) -> bool:
+    # Só tenta retry quando:
+    # - o usuário ativou omega/retries (>1)
+    # - a tool é considerada segura (ou usuário permitiu side-effect retries)
+    # - erro parece transitório (timing/foco/deps momentâneas)
+    if settings.retry_max_attempts <= 1:
+        return False
+
+    side_effect = _is_side_effect_tool(tool_name)
+    if side_effect and not settings.retry_side_effect_tools:
+        return False
+
+    e = (err or "").lower()
+    transient_markers = [
+        "timeout",
+        "timed out",
+        "tempor",
+        "try again",
+        "tente novamente",
+        "not found",
+        "não encontrado",
+        "nao encontrado",
+        "falhou",
+        "failed",
+        "busy",
+        "ocupado",
+    ]
+    return any(m in e for m in transient_markers)
+
+
+def _run_tool_with_retry(console: Console, settings: Settings, registry, call: ToolCall, memory: JsonlMemoryStore):
+    last = None
+    for attempt in range(1, settings.retry_max_attempts + 1):
+        if attempt > 1:
+            sleep_s = settings.retry_backoff_s * (attempt - 1)
+            if sleep_s:
+                time.sleep(sleep_s)
+
+        result = registry.run(call.tool_name, call.args)
+        memory.append(
+            "tool_output",
+            {
+                "tool": call.tool_name,
+                "args": call.args,
+                "attempt": attempt,
+                "status": result.status,
+                "output": result.output,
+                "error": result.error,
+            },
+        )
+
+        if result.status == "ok":
+            return result
+
+        last = result
+        if not _should_retry(settings, call.tool_name, str(result.error or "")):
+            break
+
+        console.print(
+            f"[yellow]Tool falhou (tentativa {attempt}/{settings.retry_max_attempts})[/yellow]: {call.tool_name}: {result.error}"
+        )
+
+    assert last is not None
+    return last
 
 
 def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> str | None:
@@ -255,91 +367,9 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         console.print("Agente> Ok, não vou executar isso.")
         return None
 
-    def _is_side_effect_tool(name: str) -> bool:
-        # Heurística conservadora: ferramentas que podem causar efeitos no SO.
-        # Retrys dessas ferramentas ficam desabilitados por padrão.
-        return bool(
-            name.startswith((
-                "gui.",
-                "discord.",
-                "jgrasp.",
-                "dev.",
-                "fs.delete",
-                "fs.move",
-                "fs.copy",
-                "write_file",
-                "screen.click_text",
-            ))
-            or name in {"os.open_app", "os.close_app", "os.open_url"}
-        )
-
-    def _should_retry(tool_name: str, err: str) -> bool:
-        # Só tenta retry quando:
-        # - o usuário ativou omega/retries (>1)
-        # - a tool é considerada segura (ou usuário permitiu side-effect retries)
-        # - erro parece transitório (timing/foco/deps momentâneas)
-        if settings.retry_max_attempts <= 1:
-            return False
-
-        side_effect = _is_side_effect_tool(tool_name)
-        if side_effect and not settings.retry_side_effect_tools:
-            return False
-
-        e = (err or "").lower()
-        transient_markers = [
-            "timeout",
-            "timed out",
-            "tempor",
-            "try again",
-            "tente novamente",
-            "not found",
-            "não encontrado",
-            "nao encontrado",
-            "falhou",
-            "failed",
-            "busy",
-            "ocupado",
-        ]
-        return any(m in e for m in transient_markers)
-
-    def _run_with_retry(call: ToolCall):
-        last = None
-        for attempt in range(1, settings.retry_max_attempts + 1):
-            if attempt > 1:
-                sleep_s = settings.retry_backoff_s * (attempt - 1)
-                if sleep_s:
-                    time.sleep(sleep_s)
-
-            result = registry.run(call.tool_name, call.args)
-            memory.append(
-                "tool_output",
-                {
-                    "tool": call.tool_name,
-                    "args": call.args,
-                    "attempt": attempt,
-                    "status": result.status,
-                    "output": result.output,
-                    "error": result.error,
-                },
-            )
-
-            if result.status == "ok":
-                return result
-
-            last = result
-            if not _should_retry(call.tool_name, str(result.error or "")):
-                break
-
-            console.print(
-                f"[yellow]Tool falhou (tentativa {attempt}/{settings.retry_max_attempts})[/yellow]: {call.tool_name}: {result.error}"
-            )
-
-        assert last is not None
-        return last
-
     # Execução sequencial (com retry opcional).
     for call in normalized_plan.tool_calls:
-        result = _run_with_retry(call)
+        result = _run_tool_with_retry(console, settings, registry, call, memory)
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
             console.print("Agente> Tive um erro executando o plano.")
@@ -362,6 +392,119 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
         return "Feito."
+
+
+def _execute_plan_react(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> str | None:
+    """Executa tools em loop, replanejando com base em tool outputs (ReAct-ish).
+
+    Política:
+    - Executa no máximo alguns passos para evitar loops.
+    - Pede HITL em cada tool call (porque o plano pode mudar a cada passo).
+    """
+
+    max_steps = 6
+    original_user_message = (plan.user_message or "").strip()
+    current_plan = plan
+
+    # Mantém um rastro curto para dar ao LLM.
+    trace_messages: list[dict[str, str]] = []
+
+    for step in range(1, max_steps + 1):
+        # Se o plano atual já não tem tools, finalizamos.
+        if not current_plan.tool_calls:
+            text = (current_plan.final_response or "").strip() or "Feito."
+            console.print(f"Agente> {text}")
+            memory.append("agent_response", {"text": text})
+            return text
+
+        # Executa apenas 1 tool por passo.
+        call = current_plan.tool_calls[0]
+        step_plan = current_plan.model_copy(update={"tool_calls": [call]})
+
+        # Preflight + HITL por passo.
+        effective_risk = _effective_risk_for_plan(step_plan, registry, settings=settings)
+        effective_plan = step_plan if effective_risk == step_plan.risk else step_plan.model_copy(update={"risk": effective_risk})
+        normalized_plan, _ = _normalize_plan_args(effective_plan, settings=settings)
+
+        preflight_error = _preflight_validate_plan(normalized_plan, registry)
+        if preflight_error:
+            console.print(f"[red]Preflight error:[/red] {preflight_error}")
+            console.print("Agente> Não executei por segurança.")
+            return None
+
+        console.print(Panel.fit(f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}", title="Plano"))
+
+        if not require_approval(
+            normalized_plan,
+            enabled=settings.hitl_enabled,
+            min_risk=settings.hitl_min_risk,
+            require_token=settings.hitl_require_token,
+        ):
+            console.print("Agente> Ok, não vou executar isso.")
+            return None
+
+        result = _run_tool_with_retry(console, settings, registry, call, memory)
+        if result.status == "error":
+            console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
+
+        if result.output:
+            out = result.output.strip()
+            if len(out) > 2000:
+                out = out[:2000] + "\n... [truncado]"
+            console.print(Panel(out, title=f"Tool: {call.tool_name}"))
+
+        # Alimenta o LLM com um resumo do que aconteceu.
+        out_short = (result.output or "").strip()
+        if len(out_short) > 1200:
+            out_short = out_short[:1200] + "\n... [truncado]"
+        err_short = str(result.error or "").strip()
+        if len(err_short) > 800:
+            err_short = err_short[:800] + "... [truncado]"
+
+        trace = {
+            "tool": call.tool_name,
+            "args": call.args,
+            "status": result.status,
+            "output": out_short,
+            "error": err_short,
+        }
+        trace_messages.append({"role": "assistant", "content": "TOOL_RESULT " + json.dumps(trace, ensure_ascii=False)})
+        if len(trace_messages) > 8:
+            trace_messages = trace_messages[-8:]
+
+        # Se o plano original tinha mais tools, guardamos um hint para o LLM.
+        if len(current_plan.tool_calls) > 1:
+            trace_messages.append(
+                {
+                    "role": "assistant",
+                    "content": "HINT: o plano anterior continha mais tool_calls; replaine considerando o objetivo original.",
+                }
+            )
+            if len(trace_messages) > 8:
+                trace_messages = trace_messages[-8:]
+
+        # Replaneja via LLM (mantendo o pedido original e fornecendo o rastro).
+        new_plan = route_llm(settings, original_user_message, context_messages=trace_messages)
+        if new_plan is None:
+            console.print("[yellow]Não consegui replanejar via LLM; parei por segurança.[/yellow]")
+            return None
+
+        memory.append(
+            "plan",
+            {
+                "intent": new_plan.intent,
+                "risk": str(new_plan.risk),
+                "tool_calls": [c.model_dump() for c in new_plan.tool_calls],
+            },
+        )
+        current_plan = new_plan
+
+    console.print("Agente> Parei para não entrar em loop. Se quiser, descreva o que você viu/obteve e eu continuo.")
+    memory.append(
+        "agent_response",
+        {"text": "Parei para não entrar em loop. Se quiser, descreva o que você viu/obteve e eu continuo."},
+    )
+    return "Parei para não entrar em loop. Se quiser, descreva o que você viu/obteve e eu continuo."
 
 
 def _normalize_plan_args(plan: Plan, *, settings: Settings) -> tuple[Plan, str | None]:
