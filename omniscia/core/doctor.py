@@ -86,6 +86,8 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
             ["chromadb", "sentence_transformers", "cryptography", "keyring"],
             "pip install -e .[all]  # ou .[memory]",
         ),
+        ("hotkeys", ["pynput"], "pip install -e .[all]  # ou .[hotkeys]"),
+        ("proactive", ["apscheduler", "psutil"], "pip install -e .[all]  # ou .[proactive]"),
     ]
 
     for extra, modules, fix in optional_groups:

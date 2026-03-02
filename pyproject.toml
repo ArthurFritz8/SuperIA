@@ -38,6 +38,13 @@ vision = [
 os = [
   "pyautogui>=0.9",
 ]
+hotkeys = [
+  "pynput>=1.7",
+]
+proactive = [
+  "apscheduler>=3.10",
+  "psutil>=5.9",
+]
 web = [
   "playwright>=1.44",
 ]
@@ -65,6 +72,11 @@ all = [
   "pytesseract>=0.3",
   # os
   "pyautogui>=0.9",
+  # hotkeys
+  "pynput>=1.7",
+  # proactive
+  "apscheduler>=3.10",
+  "psutil>=5.9",
   # web
   "playwright>=1.44",
   # memory

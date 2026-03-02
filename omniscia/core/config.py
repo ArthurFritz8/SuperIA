@@ -95,6 +95,23 @@ class Settings:
     retry_backoff_s: float = 0.35
     retry_side_effect_tools: bool = False
 
+    # Extensibilidade / Jarvis definitivo (opt-in)
+    # Tools custom carregadas dinamicamente de omniscia/tools/custom
+    custom_tools_enabled: bool = False
+    # Permite que o agente escreva scripts temporários em scratch/ e rode via dev.run_python.
+    # ATENÇÃO: isso habilita auto-código; mantenha HITL com token.
+    self_coding_enabled: bool = False
+    # Memória vetorial (ChromaDB) para RAG
+    vector_memory_enabled: bool = False
+    vector_memory_auto_index: bool = False
+    # Hotkey global (Ctrl+Space) para capturar contexto de tela (screenshot + OCR)
+    hotkey_screen_enabled: bool = False
+    # Proatividade (scheduler): o agente pode alertar sobre CPU/RAM/processos
+    proactive_enabled: bool = False
+    proactive_interval_s: int = 300
+    proactive_cpu_threshold: int = 95
+    proactive_ram_threshold: int = 95
+
     @staticmethod
     def load() -> "Settings":
         """Carrega settings do ambiente.
@@ -217,6 +234,29 @@ class Settings:
             os.getenv("OMNI_RETRY_SIDE_EFFECTS", "false").strip().lower() == "true"
         )
 
+        custom_tools_enabled = _bool_env("OMNI_CUSTOM_TOOLS_ENABLED", False)
+        self_coding_enabled = _bool_env("OMNI_SELF_CODING_ENABLED", False)
+        vector_memory_enabled = _bool_env("OMNI_VECTOR_MEMORY_ENABLED", False)
+        vector_memory_auto_index = _bool_env("OMNI_VECTOR_MEMORY_AUTO_INDEX", False)
+        hotkey_screen_enabled = _bool_env("OMNI_HOTKEY_SCREEN_ENABLED", False)
+        proactive_enabled = _bool_env("OMNI_PROACTIVE_ENABLED", False)
+        proactive_interval_s = _int_env("OMNI_PROACTIVE_INTERVAL_S", 300)
+        proactive_cpu_threshold = _int_env("OMNI_PROACTIVE_CPU_THRESHOLD", 95)
+        proactive_ram_threshold = _int_env("OMNI_PROACTIVE_RAM_THRESHOLD", 95)
+
+        if proactive_interval_s < 30:
+            proactive_interval_s = 30
+        if proactive_interval_s > 3600:
+            proactive_interval_s = 3600
+        if proactive_cpu_threshold < 1:
+            proactive_cpu_threshold = 1
+        if proactive_cpu_threshold > 100:
+            proactive_cpu_threshold = 100
+        if proactive_ram_threshold < 1:
+            proactive_ram_threshold = 1
+        if proactive_ram_threshold > 100:
+            proactive_ram_threshold = 100
+
         # Clamp básico para evitar valores absurdos.
         if retry_max_attempts < 1:
             retry_max_attempts = 1
@@ -268,4 +308,14 @@ class Settings:
             retry_max_attempts=retry_max_attempts,
             retry_backoff_s=retry_backoff_s,
             retry_side_effect_tools=retry_side_effect_tools,
+
+            custom_tools_enabled=custom_tools_enabled,
+            self_coding_enabled=self_coding_enabled,
+            vector_memory_enabled=vector_memory_enabled,
+            vector_memory_auto_index=vector_memory_auto_index,
+            hotkey_screen_enabled=hotkey_screen_enabled,
+            proactive_enabled=proactive_enabled,
+            proactive_interval_s=proactive_interval_s,
+            proactive_cpu_threshold=proactive_cpu_threshold,
+            proactive_ram_threshold=proactive_ram_threshold,
         )

@@ -232,6 +232,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         except Exception:
             logger.info("Memory tools indisponíveis (erro ao importar/registrar).")
 
+    # Registro opcional de memória vetorial (ChromaDB) para RAG.
+    if settings is not None and getattr(settings, "vector_memory_enabled", False):
+        try:
+            from omniscia.modules.memory.vector_tooling import register_vector_memory_tools
+
+            register_vector_memory_tools(registry, memory_store=memory_store, settings=settings)
+        except Exception:
+            logger.info("Vector memory tools indisponíveis (erro ao importar/registrar).")
+
     # Tools de filesystem (guardrailed)
     try:
         from omniscia.modules.os_control.filesystem import register_filesystem_tools
@@ -315,5 +324,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         except Exception:
             # Se o módulo ou dependência não existir, seguimos só com o core.
             logger.info("Web tools indisponíveis (Playwright não instalado ou erro ao importar).")
+
+    # Loader de tools custom (opt-in)
+    if settings is not None and getattr(settings, "custom_tools_enabled", False):
+        try:
+            from omniscia.tools.custom.loader import load_custom_tools
+
+            load_custom_tools(registry)
+        except Exception:
+            logger.info("Custom tools indisponíveis (erro ao importar/registrar).")
 
     return registry

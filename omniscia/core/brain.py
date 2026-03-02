@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from pathlib import Path
 from dataclasses import replace
@@ -46,6 +47,42 @@ def run_brain_loop(settings: Settings) -> None:
     stt = build_stt(settings, console=console)
     tts = build_tts(settings, console=console)
 
+    # Hotkey (opt-in): Ctrl+Space arma captura de tela (screenshot + OCR) para a próxima mensagem.
+    screen_hotkey_flag = threading.Event()
+    if getattr(settings, "hotkey_screen_enabled", False):
+        try:
+            from omniscia.core.hotkeys import start_screen_hotkey_listener
+
+            start_screen_hotkey_listener(screen_hotkey_flag)
+            console.print("[dim]Hotkey habilitada: Ctrl+Space (capturar contexto de tela).[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Hotkey indisponível:[/yellow] {exc}")
+
+    # Proatividade (opt-in): alerta quando CPU/RAM estiverem muito altas.
+    if getattr(settings, "proactive_enabled", False):
+        try:
+            from omniscia.core.proactive import start_proactive_scheduler
+
+            def _on_alert(msg: str) -> None:
+                # Apenas alerta + pergunta; sem ações automáticas.
+                memory.append("proactive_alert", {"text": msg})
+                console.print(f"\n[bold yellow]VOID>[/bold yellow] {msg}")
+                if tts.enabled:
+                    try:
+                        tts.speak(msg[:220] + ("..." if len(msg) > 220 else ""))
+                    except Exception:
+                        logger.exception("Falha ao falar alerta proativo (TTS)")
+
+            start_proactive_scheduler(
+                interval_s=int(getattr(settings, "proactive_interval_s", 300)),
+                cpu_threshold=int(getattr(settings, "proactive_cpu_threshold", 95)),
+                ram_threshold=int(getattr(settings, "proactive_ram_threshold", 95)),
+                on_alert=_on_alert,
+            )
+            console.print("[dim]Proatividade habilitada (scheduler em background).[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Proatividade indisponível:[/yellow] {exc}")
+
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
     while True:
@@ -69,6 +106,44 @@ def run_brain_loop(settings: Settings) -> None:
 
         if not user_message:
             continue
+
+        # Se a hotkey foi pressionada, capturamos contexto de tela antes de rotear.
+        if screen_hotkey_flag.is_set():
+            screen_hotkey_flag.clear()
+            try:
+                # Consideramos hotkey como pedido explícito de visão.
+                console.print("[dim]Capturando contexto de tela (hotkey)...[/dim]")
+                # screenshot
+                res1 = registry.run("screen.screenshot", {})
+                memory.append(
+                    "tool_output",
+                    {
+                        "tool": "screen.screenshot",
+                        "args": {},
+                        "attempt": 1,
+                        "status": res1.status,
+                        "output": res1.output,
+                        "error": res1.error,
+                    },
+                )
+                # OCR (usa latest.png por padrão no tool)
+                res2 = registry.run("screen.ocr", {})
+                memory.append(
+                    "tool_output",
+                    {
+                        "tool": "screen.ocr",
+                        "args": {},
+                        "attempt": 1,
+                        "status": res2.status,
+                        "output": res2.output,
+                        "error": res2.error,
+                    },
+                )
+                if res2.status == "ok" and (res2.output or "").strip():
+                    console.print(Panel(str(res2.output)[:2000], title="OCR (hotkey)"))
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Falha capturando contexto de tela")
+                console.print(f"[yellow]Falha ao capturar tela:[/yellow] {exc}")
 
         if stt.is_voice:
             # Transparência: mostra o texto transcrito antes de agir.
@@ -327,7 +402,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
             },
         )
 
-    preflight_error = _preflight_validate_plan(normalized_plan, registry)
+    preflight_error = _preflight_validate_plan(normalized_plan, registry, settings=settings)
     if preflight_error:
         console.print(f"[red]Preflight error:[/red] {preflight_error}")
         memory.append(
@@ -426,7 +501,7 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
         effective_plan = step_plan if effective_risk == step_plan.risk else step_plan.model_copy(update={"risk": effective_risk})
         normalized_plan, _ = _normalize_plan_args(effective_plan, settings=settings)
 
-        preflight_error = _preflight_validate_plan(normalized_plan, registry)
+        preflight_error = _preflight_validate_plan(normalized_plan, registry, settings=settings)
         if preflight_error:
             console.print(f"[red]Preflight error:[/red] {preflight_error}")
             console.print("Agente> Não executei por segurança.")
@@ -841,6 +916,25 @@ def _effective_risk_for_plan(plan: Plan, registry, *, settings: Settings | None 
 
         return None
 
+    def self_coding_risk(tool_name: str, args: dict, settings: Settings | None) -> RiskLevel | None:
+        if settings is None:
+            return None
+        if not getattr(settings, "self_coding_enabled", False):
+            return None
+
+        a = args or {}
+        if tool_name == "write_file":
+            p = str(a.get("path", "") or "").strip().replace("\\", "/")
+            if p.startswith("scratch/") and p.lower().endswith(".py"):
+                return RiskLevel.CRITICAL
+
+        if tool_name == "dev.run_python":
+            script = str(a.get("script", "") or "").strip().replace("\\", "/")
+            if script.startswith("scratch/") and script.lower().endswith(".py"):
+                return RiskLevel.CRITICAL
+
+        return None
+
     current = plan.risk
 
     for call in plan.tool_calls:
@@ -854,13 +948,17 @@ def _effective_risk_for_plan(plan: Plan, registry, *, settings: Settings | None 
         if dyn is not None and rank(dyn) > rank(tool_risk):
             tool_risk = dyn
 
+        dyn2 = self_coding_risk(call.tool_name, call.args, settings)
+        if dyn2 is not None and rank(dyn2) > rank(tool_risk):
+            tool_risk = dyn2
+
         if rank(tool_risk) > rank(current):
             current = tool_risk
 
     return current
 
 
-def _preflight_validate_plan(plan: Plan, registry) -> str | None:
+def _preflight_validate_plan(plan: Plan, registry, *, settings: Settings | None = None) -> str | None:
     """Valida tool calls antes de executar.
 
     Objetivo:
@@ -874,7 +972,7 @@ def _preflight_validate_plan(plan: Plan, registry) -> str | None:
     """
 
     for call in plan.tool_calls:
-        err = _preflight_validate_tool_call(call.tool_name, call.args, registry)
+        err = _preflight_validate_tool_call(call.tool_name, call.args, registry, settings=settings)
         if err:
             return f"{call.tool_name}: {err}"
     return None
@@ -905,7 +1003,7 @@ def _looks_like_domain(url: str) -> bool:
     return bool(re.search(r"^[a-zA-Z0-9][\w.-]+\.[a-zA-Z]{2,}(/.*)?$", u))
 
 
-def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str | None:
+def _preflight_validate_tool_call(tool_name: str, args: dict, registry, settings: Settings | None = None) -> str | None:
     # Tool desconhecida => bloqueia.
     try:
         registry.get(tool_name)
@@ -919,6 +1017,13 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
         path = str(a.get("path", "")).strip()
         if not _is_safe_rel_path(path) and path != ".":
             return "path inválido (use path relativo, sem '..' e sem drive)"
+
+        # Guardrail self-coding: escrita em scratch/ exige opt-in.
+        if tool_name == "write_file":
+            p = path.replace("\\", "/")
+            if p.startswith("scratch/"):
+                if settings is not None and not getattr(settings, "self_coding_enabled", False):
+                    return "self-coding desabilitado (habilite OMNI_SELF_CODING_ENABLED=true)"
 
     if tool_name == "screen.ocr":
         image_path = a.get("image_path")
@@ -991,6 +1096,11 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
             script = str(a.get("script", "")).strip()
             if not _is_safe_rel_path(script):
                 return "script inválido (use path relativo)"
+
+            # Guardrail self-coding: scripts em scratch/ exigem opt-in.
+            if script.replace("\\", "/").startswith("scratch/"):
+                if settings is not None and not getattr(settings, "self_coding_enabled", False):
+                    return "self-coding desabilitado (habilite OMNI_SELF_CODING_ENABLED=true)"
 
         if "timeout_s" in a:
             try:
