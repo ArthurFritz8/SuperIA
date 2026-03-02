@@ -86,6 +86,7 @@ def run_brain_loop(settings: Settings) -> None:
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
     while True:
+        hotkey_image_path: str | None = None
         try:
             if stt.is_voice:
                 console.print(
@@ -115,6 +116,8 @@ def run_brain_loop(settings: Settings) -> None:
                 console.print("[dim]Capturando contexto de tela (hotkey)...[/dim]")
                 # screenshot
                 res1 = registry.run("screen.screenshot", {})
+                if res1.status == "ok":
+                    hotkey_image_path = "data/screenshots/latest.png"
                 memory.append(
                     "tool_output",
                     {
@@ -179,7 +182,35 @@ def run_brain_loop(settings: Settings) -> None:
         if plan.intent == "chat":
             try:
                 history = _build_chat_history(memory, current_user_message=user_message)
-                response_text = chat_reply(settings, user_message, history=history)
+
+                # VLM (opt-in): se o hotkey capturou screenshot nesta rodada, podemos anexar a imagem.
+                # Isso pode enviar conteúdo da tela para um provider externo; exigimos HITL em nível CRITICAL.
+                image_path = hotkey_image_path if getattr(settings, "vlm_enabled", False) else None
+                if image_path:
+                    approval_plan = Plan(
+                        intent="vlm.chat_with_image",
+                        user_message=user_message,
+                        tool_calls=[
+                            ToolCall(
+                                tool_name="vlm.chat",
+                                args={
+                                    "image_path": image_path,
+                                    "note": "Enviar screenshot anexado para o LLM (multimodal) para analisar a tela.",
+                                },
+                            )
+                        ],
+                        risk=RiskLevel.CRITICAL,
+                        final_response="Vou anexar a captura de tela ao LLM para analisar.",
+                    )
+                    if not require_approval(
+                        approval_plan,
+                        enabled=settings.hitl_enabled,
+                        min_risk=settings.hitl_min_risk,
+                        require_token=settings.hitl_require_token,
+                    ):
+                        image_path = None
+
+                response_text = chat_reply(settings, user_message, history=history, image_path=image_path)
                 console.print(f"Agente> {response_text}")
                 memory.append("agent_response", {"text": response_text})
                 if tts.enabled and response_text:

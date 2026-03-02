@@ -155,6 +155,18 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
         )
     )
 
+    # VLM sanity (opt-in)
+    if bool(getattr(settings, "vlm_enabled", False)):
+        ok, detail = _can_import("PIL")
+        checks.append(
+            Check(
+                name="VLM (image attach)",
+                ok=ok,
+                detail=detail if ok else "Pillow (PIL) nao instalado",
+                fix=None if ok else "Instale deps de visao: pip install -e .[vision]  # ou .[all]",
+            )
+        )
+
     # LLM sanity: common source of "error toda hora" when router_mode=llm.
     if str(settings.router_mode).lower() == "llm":
         provider_ok = bool(getattr(settings, "llm_provider", None))

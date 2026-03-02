@@ -33,6 +33,7 @@ def chat_reply(
     user_message: str,
     *,
     history: list[dict[str, str]] | None = None,
+    image_path: str | None = None,
     temperature: float = 0.3,
     max_chars: int = 4000,
 ) -> str:
@@ -61,7 +62,7 @@ def chat_reply(
         "Se o usuário pedir apenas dicas/orientação (ex.: jogos), responda com passos práticos e opções, sem tools." 
     )
 
-    msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": system}]
 
     if history:
         for m in history:
@@ -70,16 +71,64 @@ def chat_reply(
             if role in {"user", "assistant"} and content.strip():
                 msgs.append({"role": role, "content": content})
 
-    msgs.append({"role": "user", "content": str(user_message or "").strip()})
+    # Optional: attach image for multimodal providers/models.
+    # This is opt-in and may send screen content over the network.
+    user_text = str(user_message or "").strip()
+    if getattr(settings, "vlm_enabled", False) and image_path:
+        try:
+            from omniscia.core.vlm import image_file_to_data_url
+
+            enc = image_file_to_data_url(image_path)
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                user_text
+                                + "\n\n[Contexto] O usuário anexou uma captura de tela (screenshot). "
+                                + "Use a imagem para responder com precisão."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": enc.data_url}},
+                    ],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("VLM indisponivel; seguindo sem imagem: %s", redact_secrets(str(exc)))
+            msgs.append({"role": "user", "content": user_text})
+    else:
+        msgs.append({"role": "user", "content": user_text})
 
     try:
-        resp: Any = completion(
-            model=settings.llm_model,
-            messages=msgs,
-            temperature=float(temperature),
-        )
-        content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
-        text = (content or "").strip()
+        try:
+            resp: Any = completion(
+                model=settings.llm_model,
+                messages=msgs,
+                temperature=float(temperature),
+            )
+            content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
+            text = (content or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            # Fallback: some providers/models reject multimodal payloads.
+            # Retry once without image content.
+            if any(isinstance(m.get("content"), list) for m in msgs if isinstance(m, dict)):
+                logger.info(
+                    "Falha no chat multimodal; retry sem imagem: %s",
+                    redact_secrets(str(exc)),
+                )
+                msgs2: list[dict[str, Any]] = []
+                for m in msgs:
+                    if m.get("role") == "user" and isinstance(m.get("content"), list):
+                        msgs2.append({"role": "user", "content": user_text})
+                    else:
+                        msgs2.append(m)
+                resp = completion(model=settings.llm_model, messages=msgs2, temperature=float(temperature))
+                content = resp["choices"][0]["message"]["content"]  # type: ignore[index]
+                text = (content or "").strip()
+            else:
+                raise
     except Exception as exc:  # noqa: BLE001
         logger.error("Falha no chat LLM: %s", redact_secrets(str(exc)))
         raise

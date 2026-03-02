@@ -112,6 +112,11 @@ class Settings:
     proactive_cpu_threshold: int = 95
     proactive_ram_threshold: int = 95
 
+    # VLM (visão via LLM) — opt-in
+    # Quando true, o assistente pode anexar screenshot (ex.: hotkey) para o LLM multimodal.
+    # ATENÇÃO: isso pode enviar imagens (conteúdo de tela) para a internet conforme o provider.
+    vlm_enabled: bool = False
+
     @staticmethod
     def load() -> "Settings":
         """Carrega settings do ambiente.
@@ -243,6 +248,7 @@ class Settings:
         proactive_interval_s = _int_env("OMNI_PROACTIVE_INTERVAL_S", 300)
         proactive_cpu_threshold = _int_env("OMNI_PROACTIVE_CPU_THRESHOLD", 95)
         proactive_ram_threshold = _int_env("OMNI_PROACTIVE_RAM_THRESHOLD", 95)
+        vlm_enabled = _bool_env("OMNI_VLM_ENABLED", False)
 
         if proactive_interval_s < 30:
             proactive_interval_s = 30
@@ -318,4 +324,6 @@ class Settings:
             proactive_interval_s=proactive_interval_s,
             proactive_cpu_threshold=proactive_cpu_threshold,
             proactive_ram_threshold=proactive_ram_threshold,
+
+            vlm_enabled=vlm_enabled,
         )
