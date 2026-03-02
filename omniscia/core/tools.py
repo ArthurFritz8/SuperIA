@@ -253,7 +253,7 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     try:
         from omniscia.modules.dev_agent.tooling import register_dev_tools
 
-        register_dev_tools(registry)
+        register_dev_tools(registry, settings=settings)
     except Exception:
         logger.info("DevAgent tools indisponíveis (erro ao importar/registrar).")
 

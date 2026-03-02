@@ -994,6 +994,7 @@ def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]])
         "- Self-coding (opt-in):\n"
         "  - Se NÃO existir uma tool adequada e o usuário pedir para 'criar uma ferramenta' ou 'criar um script', você pode propor self-coding.\n"
         "  - Faça isso SOMENTE como plano explícito e seguro: (1) write_file em scratch/<nome>.py, (2) dev.run_python com script='scratch/<nome>.py'.\n"
+        "  - Alternativa (preferida para plugins): use dev.create_tool para criar um módulo em omniscia/tools/custom e recarregar tools no runtime.\n"
         "  - Marque risk=CRITICAL e descreva claramente o que o script faz.\n"
         "  - Nunca escreva scripts fora de scratch/.\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
@@ -1012,6 +1013,7 @@ def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]])
         "- memory.search -> {query, limit}\n"
         "- memory.search_vector -> {query, limit} (se disponível)\n"
         "- memory.index_recent -> {limit} (se disponível)\n"
+        "- memory.remember -> {text, topic?, tags?} (se disponível; salva memória durável)\n"
         "- web.get_page_text -> {url, max_chars}\n"
         "- web.screenshot -> {url, path?}\n"
         "- web.get_links -> {url, max_links?}\n"
@@ -1034,6 +1036,7 @@ def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]])
         "IMPORTANTE: Para clicar/digitar na tela, primeiro use screen.find_text para obter coordenadas, depois gui.click/gui.type_text.\n"
         "- dev.exec -> {command, timeout_s}\n"
         "- dev.run_python -> {code, timeout_s}\n"
+        "- dev.create_tool -> {name, code, overwrite?} (CRITICAL; cria tool custom e hot-reload; requer opt-in)\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"
         "- dev.autofix_cmd -> {command, max_iters, timeout_s} (apenas pytest)\\n"
     )

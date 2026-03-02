@@ -104,6 +104,8 @@ class Settings:
     # Memória vetorial (ChromaDB) para RAG
     vector_memory_enabled: bool = False
     vector_memory_auto_index: bool = False
+    # Aprendizagem contínua (opt-in): após respostas longas/complexas, o agente pode sintetizar e salvar memórias.
+    vector_memory_auto_remember: bool = False
     # Hotkey global (Ctrl+Space) para capturar contexto de tela (screenshot + OCR)
     hotkey_screen_enabled: bool = False
     # Proatividade (scheduler): o agente pode alertar sobre CPU/RAM/processos
@@ -243,6 +245,7 @@ class Settings:
         self_coding_enabled = _bool_env("OMNI_SELF_CODING_ENABLED", False)
         vector_memory_enabled = _bool_env("OMNI_VECTOR_MEMORY_ENABLED", False)
         vector_memory_auto_index = _bool_env("OMNI_VECTOR_MEMORY_AUTO_INDEX", False)
+        vector_memory_auto_remember = _bool_env("OMNI_VECTOR_MEMORY_AUTO_REMEMBER", False)
         hotkey_screen_enabled = _bool_env("OMNI_HOTKEY_SCREEN_ENABLED", False)
         proactive_enabled = _bool_env("OMNI_PROACTIVE_ENABLED", False)
         proactive_interval_s = _int_env("OMNI_PROACTIVE_INTERVAL_S", 300)
@@ -319,6 +322,7 @@ class Settings:
             self_coding_enabled=self_coding_enabled,
             vector_memory_enabled=vector_memory_enabled,
             vector_memory_auto_index=vector_memory_auto_index,
+            vector_memory_auto_remember=vector_memory_auto_remember,
             hotkey_screen_enabled=hotkey_screen_enabled,
             proactive_enabled=proactive_enabled,
             proactive_interval_s=proactive_interval_s,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import time
 from typing import Any
 
 from omniscia.core.config import Settings
@@ -53,6 +54,15 @@ def register_vector_memory_tools(
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="memory.remember",
+            description="Salva uma memória durável (texto) na memória vetorial (ChromaDB)",
+            risk="LOW",
+            fn=lambda args: _remember(args, vm=vm),
+        )
+    )
+
     # Auto-index opcional (best-effort): indexa um pequeno lote recente ao iniciar.
     if settings.vector_memory_auto_index and memory_store is not None:
         try:
@@ -66,6 +76,15 @@ def _stable_id(kind: str, payload: dict[str, Any]) -> str:
     h.update((kind or "").encode("utf-8"))
     h.update(b"\n")
     h.update(str(payload).encode("utf-8", errors="ignore"))
+    return h.hexdigest()[:24]
+
+
+def _stable_text_id(text: str) -> str:
+    h = hashlib.sha256()
+    h.update(text.encode("utf-8", errors="ignore"))
+    h.update(b"\n")
+    # Add a small time component so repeated remembers can coexist.
+    h.update(str(int(time.time())).encode("ascii"))
     return h.hexdigest()[:24]
 
 
@@ -136,3 +155,23 @@ def _index_recent(args: dict[str, Any], *, vm: ChromaVectorMemory, store: JsonlM
         n += 1
 
     return ToolResult(status="ok", output=f"indexed {n} events")
+
+
+def _remember(args: dict[str, Any], *, vm: ChromaVectorMemory) -> ToolResult:
+    text = str(args.get("text", "") or "").strip()
+    if not text:
+        return ToolResult(status="error", error="text vazio")
+
+    # Optional lightweight metadata
+    tags = args.get("tags")
+    meta: dict[str, Any] = {}
+    if isinstance(tags, list):
+        # keep small
+        meta["tags"] = ",".join(str(t).strip() for t in tags if str(t).strip())[:200]
+    if isinstance(args.get("topic"), str) and str(args.get("topic") or "").strip():
+        meta["topic"] = str(args.get("topic") or "").strip()[:120]
+    meta["kind"] = "remember"
+
+    item_id = _stable_text_id(text)
+    vm.upsert(item_id=item_id, text=text, meta=meta)
+    return ToolResult(status="ok", output=f"remembered id={item_id}")

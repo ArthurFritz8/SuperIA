@@ -47,6 +47,24 @@ def run_brain_loop(settings: Settings) -> None:
     stt = build_stt(settings, console=console)
     tts = build_tts(settings, console=console)
 
+    # Lock para evitar concorrência no TTS (alguns engines não são thread-safe).
+    tts_lock = threading.Lock()
+
+    # Memória vetorial (opt-in) para RAG. Best-effort: se deps faltarem, seguimos sem.
+    vector_memory = None
+    if getattr(settings, "vector_memory_enabled", False):
+        try:
+            from omniscia.modules.memory.vector_store import ChromaVectorMemory
+
+            vector_memory = ChromaVectorMemory(
+                persist_dir="data/chroma",
+                collection="omniscia_memory",
+                embed_model="all-MiniLM-L6-v2",
+            )
+            console.print("[dim]Memória vetorial habilitada (RAG).[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Memória vetorial indisponível:[/yellow] {exc}")
+
     # Hotkey (opt-in): Ctrl+Space arma captura de tela (screenshot + OCR) para a próxima mensagem.
     screen_hotkey_flag = threading.Event()
     if getattr(settings, "hotkey_screen_enabled", False):
@@ -69,7 +87,8 @@ def run_brain_loop(settings: Settings) -> None:
                 console.print(f"\n[bold yellow]VOID>[/bold yellow] {msg}")
                 if tts.enabled:
                     try:
-                        tts.speak(msg[:220] + ("..." if len(msg) > 220 else ""))
+                        with tts_lock:
+                            tts.speak(msg[:220] + ("..." if len(msg) > 220 else ""))
                     except Exception:
                         logger.exception("Falha ao falar alerta proativo (TTS)")
 
@@ -87,6 +106,7 @@ def run_brain_loop(settings: Settings) -> None:
 
     while True:
         hotkey_image_path: str | None = None
+        hotkey_ocr_text: str | None = None
         try:
             if stt.is_voice:
                 console.print(
@@ -131,6 +151,8 @@ def run_brain_loop(settings: Settings) -> None:
                 )
                 # OCR (usa latest.png por padrão no tool)
                 res2 = registry.run("screen.ocr", {})
+                if res2.status == "ok":
+                    hotkey_ocr_text = (res2.output or "").strip() or None
                 memory.append(
                     "tool_output",
                     {
@@ -144,6 +166,16 @@ def run_brain_loop(settings: Settings) -> None:
                 )
                 if res2.status == "ok" and (res2.output or "").strip():
                     console.print(Panel(str(res2.output)[:2000], title="OCR (hotkey)"))
+
+                # Evento compacto para o LLM entender que o usuário chamou via hotkey.
+                memory.append(
+                    "screen_context",
+                    {
+                        "image_path": hotkey_image_path,
+                        "ocr": hotkey_ocr_text,
+                        "note": "Usuário acionou hotkey (Ctrl+Space) para ajuda contextual da tela.",
+                    },
+                )
             except Exception as exc:  # noqa: BLE001
                 logger.exception("Falha capturando contexto de tela")
                 console.print(f"[yellow]Falha ao capturar tela:[/yellow] {exc}")
@@ -181,7 +213,24 @@ def run_brain_loop(settings: Settings) -> None:
         # Isso deixa o assistente muito mais "Jarvis" no dia-a-dia.
         if plan.intent == "chat":
             try:
-                history = _build_chat_history(memory, current_user_message=user_message)
+                history = _build_chat_history(
+                    memory,
+                    current_user_message=user_message,
+                    vector_memory=vector_memory,
+                )
+
+                # Se houver OCR recente, adiciona ao texto para o LLM ter contexto explícito.
+                effective_user_message = user_message
+                if hotkey_ocr_text:
+                    ocr_snip = hotkey_ocr_text
+                    if len(ocr_snip) > 2000:
+                        ocr_snip = ocr_snip[:2000] + "\n... [truncado]"
+                    effective_user_message = (
+                        effective_user_message
+                        + "\n\n[Contexto de tela: OCR]"
+                        + "\n"
+                        + ocr_snip
+                    )
 
                 # VLM (opt-in): se o hotkey capturou screenshot nesta rodada, podemos anexar a imagem.
                 # Isso pode enviar conteúdo da tela para um provider externo; exigimos HITL em nível CRITICAL.
@@ -210,15 +259,37 @@ def run_brain_loop(settings: Settings) -> None:
                     ):
                         image_path = None
 
-                response_text = chat_reply(settings, user_message, history=history, image_path=image_path)
+                response_text = chat_reply(
+                    settings,
+                    effective_user_message,
+                    history=history,
+                    image_path=image_path,
+                )
                 console.print(f"Agente> {response_text}")
                 memory.append("agent_response", {"text": response_text})
+
+                # Aprendizagem contínua (opt-in): sintetiza uma memória e salva no Chroma.
+                if (
+                    getattr(settings, "vector_memory_enabled", False)
+                    and getattr(settings, "vector_memory_auto_remember", False)
+                    and settings.router_mode == "llm"
+                ):
+                    _auto_remember_best_effort(
+                        console=console,
+                        settings=settings,
+                        registry=registry,
+                        memory=memory,
+                        user_message=user_message,
+                        assistant_response=response_text,
+                    )
+
                 if tts.enabled and response_text:
                     try:
                         t = response_text.strip()
                         if len(t) > 400:
                             t = t[:400] + "..."
-                        tts.speak(t)
+                        with tts_lock:
+                            tts.speak(t)
                     except Exception:
                         logger.exception("Falha ao falar resposta (TTS)")
                 continue
@@ -278,7 +349,12 @@ def run_brain_loop(settings: Settings) -> None:
                 logger.exception("Falha ao falar resposta (TTS)")
 
 
-def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) -> list[dict[str, str]]:
+def _build_chat_history(
+    memory: JsonlMemoryStore,
+    *,
+    current_user_message: str,
+    vector_memory=None,
+) -> list[dict[str, str]]:
     """Monta um histórico curto para dar contexto ao chat.
 
     Observações:
@@ -295,6 +371,24 @@ def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) 
             events = events[1:]
 
     msgs: list[dict[str, str]] = []
+
+    # RAG (memória vetorial): injeta hits mais relevantes como contexto do assistente.
+    if vector_memory is not None:
+        try:
+            hits = vector_memory.query(query=str(current_user_message or ""), limit=4)
+            if hits:
+                lines: list[str] = ["MEMÓRIA RECUPERADA (vetorial):"]
+                for h in hits:
+                    t = (h.text or "").strip()
+                    if len(t) > 500:
+                        t = t[:500] + "..."
+                    lines.append(f"- [{h.score:.2f}] {t}")
+                blob = "\n".join(lines)
+                if len(blob) > 1800:
+                    blob = blob[:1800] + "\n... [truncado]"
+                msgs.append({"role": "assistant", "content": blob})
+        except Exception:
+            logger.exception("Falha consultando memória vetorial (best-effort)")
     for e in reversed(events):
         if e.kind == "user_message":
             t = str((e.payload or {}).get("text", "") or "").strip()
@@ -325,10 +419,88 @@ def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) 
             if tool:
                 msgs.append({"role": "assistant", "content": text})
 
+        elif e.kind == "proactive_alert":
+            t = str((e.payload or {}).get("text", "") or "").strip()
+            if t:
+                msgs.append({"role": "assistant", "content": "PROACTIVE_ALERT: " + t})
+
+        elif e.kind == "screen_context":
+            note = str((e.payload or {}).get("note", "") or "").strip()
+            ocr = str((e.payload or {}).get("ocr", "") or "").strip()
+            parts: list[str] = []
+            if note:
+                parts.append(note)
+            if ocr:
+                if len(ocr) > 1200:
+                    ocr = ocr[:1200] + "\n... [truncado]"
+                parts.append("OCR:\n" + ocr)
+            if parts:
+                msgs.append({"role": "assistant", "content": "SCREEN_CONTEXT:\n" + "\n".join(parts)})
+
     # Mantém apenas o rastro mais recente.
     if len(msgs) > 10:
         msgs = msgs[-10:]
     return msgs
+
+
+def _auto_remember_best_effort(
+    *,
+    console: Console,
+    settings: Settings,
+    registry,
+    memory: JsonlMemoryStore,
+    user_message: str,
+    assistant_response: str,
+) -> None:
+    """Gera e salva uma memória curta via tool memory.remember (opt-in).
+
+    Estratégia:
+    - Best-effort (não pode quebrar a conversa).
+    - Usa o router LLM para sintetizar um texto de memória.
+    - Executa SOMENTE memory.remember; qualquer outra tool é ignorada.
+    """
+
+    try:
+        # Só vale a pena para respostas mais "densas".
+        if len((assistant_response or "").strip()) < 450:
+            return
+
+        prompt = (
+            "INTERNAL: Gere uma memória curta e durável para eu lembrar no futuro. "
+            "Se não houver nada útil para lembrar, retorne tool_calls=[] e final_response=''. "
+            "Se houver, use APENAS a tool memory.remember com args {text, topic?, tags?}. "
+            "O campo text deve ter 1-4 linhas, objetivo e reutilizável."
+        )
+
+        ctx = [
+            {"role": "user", "content": str(user_message or "").strip()},
+            {"role": "assistant", "content": str(assistant_response or "").strip()[:2000]},
+        ]
+
+        plan = route_llm(settings, prompt, context_messages=ctx)
+        if plan is None or not plan.tool_calls:
+            return
+
+        # Permite apenas memory.remember
+        calls = [c for c in plan.tool_calls if (c.tool_name or "").strip() == "memory.remember"]
+        if not calls:
+            return
+
+        call = calls[0]
+        res = registry.run("memory.remember", dict(call.args or {}))
+        memory.append(
+            "tool_output",
+            {
+                "tool": "memory.remember",
+                "args": dict(call.args or {}),
+                "attempt": 1,
+                "status": res.status,
+                "output": res.output,
+                "error": res.error,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[dim]Auto-remember falhou (best-effort):[/dim] {exc}")
 
 
 def _is_side_effect_tool(name: str) -> bool:

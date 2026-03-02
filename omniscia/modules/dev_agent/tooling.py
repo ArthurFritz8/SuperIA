@@ -24,7 +24,7 @@ from omniscia.modules.dev_agent.scaffold import scaffold_python_project
 from omniscia.core.config import Settings
 
 
-def register_dev_tools(registry: ToolRegistry) -> None:
+def register_dev_tools(registry: ToolRegistry, *, settings: Settings | None = None) -> None:
     registry.register(
         ToolSpec(
             name="dev.exec",
@@ -69,6 +69,86 @@ def register_dev_tools(registry: ToolRegistry) -> None:
             fn=scaffold_python_project,
         )
     )
+
+    # Auto-programação (opt-in): cria um módulo em omniscia/tools/custom e recarrega tools.
+    registry.register(
+        ToolSpec(
+            name="dev.create_tool",
+            description=(
+                "Cria um módulo de tool em omniscia/tools/custom/<name>.py e hot-reload das tools custom. "
+                "Requer OMNI_SELF_CODING_ENABLED=true e OMNI_CUSTOM_TOOLS_ENABLED=true."
+            ),
+            risk="CRITICAL",
+            fn=lambda args: _dev_create_tool(args, registry=registry, settings=settings),
+        )
+    )
+
+
+def _safe_module_name(name: str) -> str:
+    """Sanitiza nome de módulo Python.
+
+    Permitimos: letras, números, underscore. Começa com letra/underscore.
+    Substitui '.' e '-' por '_' para permitir nomes estilo tool (ex: crypto.quote).
+    """
+
+    n = (name or "").strip().replace("-", "_").replace(".", "_")
+    out = []
+    for ch in n:
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+    s = "".join(out)
+    if not s:
+        raise ValueError("name inválido")
+    if not (s[0].isalpha() or s[0] == "_"):
+        s = "_" + s
+    return s[:64]
+
+
+def _dev_create_tool(args: dict[str, Any], *, registry: ToolRegistry, settings: Settings | None) -> ToolResult:
+    if settings is None:
+        settings = Settings.load()
+
+    if not bool(getattr(settings, "self_coding_enabled", False)):
+        return ToolResult(status="error", error="dev.create_tool desabilitado (OMNI_SELF_CODING_ENABLED=false)")
+    if not bool(getattr(settings, "custom_tools_enabled", False)):
+        return ToolResult(status="error", error="custom tools desabilitadas (OMNI_CUSTOM_TOOLS_ENABLED=false)")
+
+    raw_name = str(args.get("name", "") or "").strip()
+    code = str(args.get("code", "") or "")
+    overwrite = bool(args.get("overwrite", False))
+
+    if not raw_name:
+        return ToolResult(status="error", error="informe name")
+    if not code.strip():
+        return ToolResult(status="error", error="code vazio")
+
+    try:
+        mod = _safe_module_name(raw_name)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+    out_dir = Path("omniscia/tools/custom")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{mod}.py"
+
+    if out_path.exists() and not overwrite:
+        return ToolResult(status="error", error="arquivo já existe (use overwrite=true)")
+
+    # Guardrail simples: não permite escrever fora do diretório esperado.
+    if ".." in out_path.as_posix().split("/"):
+        return ToolResult(status="error", error="path inválido")
+
+    out_path.write_text(code, encoding="utf-8")
+
+    # Hot-reload: tenta carregar o novo módulo e registrar tools.
+    try:
+        from omniscia.tools.custom.loader import load_custom_tools
+
+        load_custom_tools(registry)
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=f"tool escrita, mas hot-reload falhou: {exc}")
+
+    return ToolResult(status="ok", output=f"created custom tool module: {out_path.as_posix()}")
 
 
 def _dev_exec(args: dict[str, Any]) -> ToolResult:
