@@ -15,6 +15,7 @@ import json
 import logging
 import re
 import unicodedata
+from datetime import datetime
 from typing import Any
 
 from omniscia.core.config import Settings
@@ -70,6 +71,9 @@ def route(settings: Settings, user_message: str) -> Plan:
         # Vision basics
         "screen.screenshot",
         "screen.ocr",
+        # Router intents for vision
+        "vision.screenshot",
+        "vision.ocr",
         # GUI explicit coordinates
         "gui.get_mouse",
         "gui.move_mouse",
@@ -82,6 +86,16 @@ def route(settings: Settings, user_message: str) -> Plan:
         "discord.send_message",
         "jgrasp.create_java_program",
         "jgrasp.write_code",
+        # DevAgent (explicit)
+        "dev.exec",
+        "dev.run_python",
+        "dev.autofix_python_file",
+        "dev.autofix_cmd",
+        "dev.scaffold_project",
+        # Session toggles
+        "core.omega_on",
+        "core.omega_off",
+        "core.help",
     }
     if heuristic.intent in deterministic_intents:
         return heuristic
@@ -89,8 +103,73 @@ def route(settings: Settings, user_message: str) -> Plan:
     if settings.router_mode == "llm":
         plan = _route_with_llm(settings, user_message)
         if plan is not None:
-            # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
+            # Guardrail: não execute automação/visão a menos que o usuário peça explicitamente.
+            # Motivação: perguntas de orientação (ex: jogos) devem ser respondidas em texto.
             norm = _normalize(user_message)
+
+            def _asked_for_screen_or_gui(n: str) -> bool:
+                # IMPORTANTE: não basta mencionar "tela".
+                # Ex.: "na minha tela apareceu..." NÃO é pedido pra usar OCR/screenshot.
+                # Só libera tools quando houver pedido explícito (imperativo) ou ação (clicar/digitar).
+
+                # Pedidos explícitos de clique/teclado.
+                if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite)\b", n):
+                    return True
+
+                # Pedidos explícitos de screenshot/OCR.
+                if re.search(
+                    r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
+                    n,
+                ):
+                    return True
+
+                # Imperativo + tela/screen.
+                # Evita regex frágil: basta ter verbo de pedido + palavra tela/screen.
+                has_imperative = bool(
+                    re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n)
+                )
+                has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
+                return has_imperative and has_screen_word
+
+            def _asked_for_dev_exec(n: str) -> bool:
+                return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
+
+            asked_screen_or_gui = _asked_for_screen_or_gui(norm)
+            asked_dev = _asked_for_dev_exec(norm)
+
+            def _has_forbidden_tools(p: Plan) -> bool:
+                for c in p.tool_calls:
+                    name = (c.tool_name or "").strip()
+                    if name.startswith(("screen.", "gui.")) or name in {"win.focus_window"}:
+                        if not asked_screen_or_gui:
+                            return True
+                    if name.startswith("dev.") and not asked_dev:
+                        return True
+                return False
+
+            if _has_forbidden_tools(plan):
+                # Tenta uma segunda vez instruindo explicitamente a responder só em texto.
+                no_tools_msg = (
+                    user_message
+                    + "\n\nIMPORTANTE: o usuário NÃO pediu para ver/clicar na tela nem executar comandos. "
+                    + "Responda APENAS com orientação em texto, tool_calls=[] e risk=LOW."
+                )
+                plan2 = _route_with_llm(settings, no_tools_msg)
+                if plan2 is not None and not _has_forbidden_tools(plan2) and (plan2.final_response or "").strip():
+                    plan = plan2
+                else:
+                    # Fallback final: zera tools e devolve resposta textual (se existir).
+                    plan = plan.model_copy(
+                        update={
+                            "intent": "chat",
+                            "risk": RiskLevel.LOW,
+                            "tool_calls": [],
+                            "final_response": (plan.final_response or "").strip()
+                            or "Posso te orientar em texto. Me diga qual Pokémon é, seu level e quais golpes ele já tem.",
+                        }
+                    )
+
+            # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
             if any((c.tool_name or "").startswith("discord.") for c in plan.tool_calls):
                 asked_discord = "discord" in norm
                 asked_message = bool(re.search(r"\b(mensagem|msg|chat)\b", norm))
@@ -105,6 +184,41 @@ def route(settings: Settings, user_message: str) -> Plan:
 def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
+
+    def _guess_name_from_text(text: str) -> str | None:
+        # quoted "Meu Projeto"
+        q = re.search(r"['\"]([^'\"]{2,60})['\"]", text)
+        if q:
+            return q.group(1).strip()
+        m = re.search(r"\b(chamado|chamada|nome)\b\s+([\w\- ]{2,60})", text, flags=re.IGNORECASE)
+        if m:
+            return (m.group(2) or "").strip()
+        return None
+
+    # Regra: toggles de sessão (modo omega)
+    if re.search(r"\b(omega|jarvis)\b", norm) and re.search(
+        r"\b(ativar|ativa|liga|ligar|on|habilitar)\b",
+        norm,
+    ):
+        return Plan(
+            intent="core.omega_on",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — modo omega ativado nesta sessão.",
+        )
+
+    if re.search(r"\b(omega|jarvis)\b", norm) and re.search(
+        r"\b(desativar|desativa|desliga|desligar|off)\b",
+        norm,
+    ):
+        return Plan(
+            intent="core.omega_off",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — modo omega desativado nesta sessão.",
+        )
 
     def _strip_quotes(s: str) -> str:
         return (s or "").strip().strip('"').strip("'").strip()
@@ -131,14 +245,60 @@ def _route_heuristic(user_message: str) -> Plan:
         )[0].strip()
         return tail.strip().strip('"').strip("'")
 
+    def _matrix_java_code() -> str:
+        return (
+            "public class Matriz {\n"
+            "    public static void main(String[] args) {\n"
+            "        int linhas = 3;\n"
+            "        int colunas = 3;\n"
+            "        int[][] matriz = new int[linhas][colunas];\n\n"
+            "        // Preenche com um padrão simples\n"
+            "        for (int i = 0; i < linhas; i++) {\n"
+            "            for (int j = 0; j < colunas; j++) {\n"
+            "                matriz[i][j] = (i + 1) * (j + 1);\n"
+            "            }\n"
+            "        }\n\n"
+            "        // Imprime a matriz\n"
+            "        System.out.println(\"Matriz 3x3:\");\n"
+            "        for (int i = 0; i < linhas; i++) {\n"
+            "            for (int j = 0; j < colunas; j++) {\n"
+            "                System.out.print(matriz[i][j] + \"\\t\");\n"
+            "            }\n"
+            "            System.out.println();\n"
+            "        }\n\n"
+            "        // Soma dos elementos\n"
+            "        int soma = 0;\n"
+            "        for (int i = 0; i < linhas; i++) {\n"
+            "            for (int j = 0; j < colunas; j++) {\n"
+            "                soma += matriz[i][j];\n"
+            "            }\n"
+            "        }\n"
+            "        System.out.println(\"Soma = \" + soma);\n"
+            "    }\n"
+            "}\n"
+        )
+
     # Regra: screenshot
-    if re.search(r"\b(screenshot|printscreen|print screen|captura de tela|tire uma captura)\b", norm):
+    is_screenshot = bool(
+        re.search(r"\b(screenshot|printscreen|print screen|captura de tela|tire uma captura)\b", norm)
+        or (re.search(r"\bprint\b", norm) and re.search(r"\b(tela|screen)\b", norm))
+    )
+    if is_screenshot:
+        wants_desktop = bool(re.search(r"\b(área de trabalho|area de trabalho|desktop)\b", norm))
+        wants_save = bool(re.search(r"\b(salvar|salva|salve|guardar)\b", norm))
+
+        args: dict[str, Any] = {}
+        if wants_desktop and wants_save:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            args["path"] = f"desktop:/screen_{ts}.png"
         return Plan(
             intent="vision.screenshot",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="screen.screenshot", args={})],
+            tool_calls=[ToolCall(tool_name="screen.screenshot", args=args)],
             risk=RiskLevel.MEDIUM,
-            final_response="Tirei uma captura de tela.",
+            final_response=(
+                "Tirei uma captura de tela e salvei na Área de Trabalho." if (wants_desktop and wants_save) else "Tirei uma captura de tela."
+            ),
         )
 
     # Regra: abrir Explorador / gerenciador de arquivos
@@ -199,9 +359,7 @@ def _route_heuristic(user_message: str) -> Plan:
         return Plan(
             intent="os.open_url",
             user_message=msg,
-            tool_calls=[
-                ToolCall(tool_name="os.open_url", args={"url": "https://www.youtube.com/"})
-            ],
+            tool_calls=[ToolCall(tool_name="os.open_url", args={"url": "https://www.youtube.com/"})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri o YouTube no seu navegador.",
         )
@@ -244,6 +402,31 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok — vou fechar o Discord (requer aprovação).",
         )
 
+    # Regra: modificar/apagar o código e fazer uma matriz (substitui o editor atual no jGRASP)
+    # Ex: "modifique o codigo, apague o codigo e faça uma matriz agora"
+    if re.search(r"\b(matriz|matrix)\b", norm) and re.search(r"\b(codigo|editor)\b", norm):
+        if re.search(
+            r"\b(modificar|modifique|alterar|altere|editar|edite|apagar|apague|limpar|limpe|substituir|substitua|trocar|troque|remover|remova)\b",
+            norm,
+        ):
+            code = _matrix_java_code()
+            return Plan(
+                intent="jgrasp.write_code",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="jgrasp.write_code",
+                        args={
+                            "code": code,
+                            "select_all": True,
+                            "settle_ms": 700,
+                        },
+                    )
+                ],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou substituir o código no editor do jGRASP por um exemplo de matriz (requer aprovação).",
+            )
+
     # Regra: código de matriz no jGRASP (determinístico; evita LLM enfiar código em `message`)
     if "jgrasp" in norm and re.search(r"\b(matriz|matrix)\b", norm):
         if re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|escrever|escreva|montar)\b", norm):
@@ -254,37 +437,7 @@ def _route_heuristic(user_message: str) -> Plan:
             if wants_desktop:
                 path = f"desktop:/{class_name}/{class_name}.java"
 
-            code = (
-                "public class Matriz {\n"
-                "    public static void main(String[] args) {\n"
-                "        int linhas = 3;\n"
-                "        int colunas = 3;\n"
-                "        int[][] matriz = new int[linhas][colunas];\n\n"
-                "        // Preenche com um padrão simples\n"
-                "        for (int i = 0; i < linhas; i++) {\n"
-                "            for (int j = 0; j < colunas; j++) {\n"
-                "                matriz[i][j] = (i + 1) * (j + 1);\n"
-                "            }\n"
-                "        }\n\n"
-                "        // Imprime a matriz\n"
-                "        System.out.println(\"Matriz 3x3:\");\n"
-                "        for (int i = 0; i < linhas; i++) {\n"
-                "            for (int j = 0; j < colunas; j++) {\n"
-                "                System.out.print(matriz[i][j] + \"\\t\");\n"
-                "            }\n"
-                "            System.out.println();\n"
-                "        }\n\n"
-                "        // Soma dos elementos\n"
-                "        int soma = 0;\n"
-                "        for (int i = 0; i < linhas; i++) {\n"
-                "            for (int j = 0; j < colunas; j++) {\n"
-                "                soma += matriz[i][j];\n"
-                "            }\n"
-                "        }\n"
-                "        System.out.println(\"Soma = \" + soma);\n"
-                "    }\n"
-                "}\n"
-            )
+            code = _matrix_java_code()
 
             return Plan(
                 intent="jgrasp.create_java_program",
@@ -612,6 +765,29 @@ def _route_heuristic(user_message: str) -> Plan:
         )
 
     # Regra: DEV - executar comando (ex: "executar: python -c \"print(2+2)\"")
+    # Regra: DEV - compilar/verificar o projeto (Python)
+    # "compilar" em Python = verificar que tudo importa/compila + (opcional) rodar testes.
+    if re.search(r"\b(compilar|compila|compile|build)\b", norm) and re.search(
+        r"\b(projeto|project|repositorio|repo)\b", norm
+    ):
+        # Mantemos comandos allowlisted (python/pytest) para passar pelo sandbox com segurança.
+        return Plan(
+            intent="dev.exec",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(
+                    tool_name="dev.exec",
+                    args={"command": "python -m compileall -q omniscia", "timeout_s": 120},
+                ),
+                ToolCall(
+                    tool_name="dev.exec",
+                    args={"command": "python -m pytest -q", "timeout_s": 300},
+                ),
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou verificar/compilar o projeto (compileall) e rodar os testes (requer aprovacao).",
+        )
+
     m = re.search(r"\b(executar|rodar)\b\s*[:]\s*(.+)$", msg, flags=re.IGNORECASE)
     if m:
         command = m.group(2).strip()
@@ -744,6 +920,14 @@ def _route_heuristic(user_message: str) -> Plan:
 
     # Regra: memória
     if re.search(r"\b(lembra|lembrar|memoria|o que falamos|historico)\b", norm):
+        if re.search(r"\b(ultim|recent|timeline|log|acao|acoes)\b", norm):
+            return Plan(
+                intent="memory.recent",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="memory.recent", args={"limit": 30})],
+                risk=RiskLevel.LOW,
+                final_response="Aqui estão as ações mais recentes.",
+            )
         # Extrai query simples removendo palavras comuns.
         q = re.sub(r"\b(lembra|lembrar|memoria|o que falamos|historico)\b", "", norm)
         q = q.strip() or msg
@@ -754,6 +938,28 @@ def _route_heuristic(user_message: str) -> Plan:
             risk=RiskLevel.LOW,
             final_response="Busquei na memória recente.",
         )
+
+    # Regra: criar/iniciar projeto python (scaffold)
+    if re.search(r"\b(projeto|project|app|aplicacao|aplicacao)\b", norm) and re.search(
+        r"\b(criar|crie|cria|novo|iniciar|inicia|montar|gera|gerar)\b",
+        norm,
+    ):
+        wants_python = bool(re.search(r"\bpython\b", norm))
+        # Default: python (mais útil no workspace do agente)
+        if wants_python or "java" not in norm:
+            name = _guess_name_from_text(msg) or "MeuProjeto"
+            return Plan(
+                intent="dev.scaffold_project",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="dev.scaffold_project",
+                        args={"name": name},
+                    ),
+                ],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou criar um projeto Python no workspace (requer aprovação).",
+            )
 
     # Regra: web read-only (ler página)
     # Se detectar uma URL ou intenção clara de abrir/ler um site.
@@ -785,7 +991,16 @@ def _route_heuristic(user_message: str) -> Plan:
         )
 
     # Regra: ajuda/tools
-    if norm in {"tools", "tool", "ajuda", "help", "comandos", "commands"}:
+    if norm in {"ajuda", "help", "comandos", "commands"}:
+        return Plan(
+            intent="core.help",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.help", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Aqui vai um guia rápido.",
+        )
+
+    if norm in {"tools", "tool"}:
         return Plan(
             intent="core.list_tools",
             user_message=msg,
@@ -855,13 +1070,13 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, vou criar um arquivo (relativo ao workspace).",
         )
 
-    # Default: ecoa e responde
+    # Default: chat (sem tools). O brain pode responder via LLM quando configurado.
     return Plan(
         intent="chat",
         user_message=msg,
-        tool_calls=[ToolCall(tool_name="echo", args={"text": msg})],
+        tool_calls=[],
         risk=RiskLevel.LOW,
-        final_response="Entendi. (MVP: roteador heurístico)",
+        final_response="Ok. Me diga o que você quer fazer/entender e eu te ajudo.",
     )
 
 
@@ -905,6 +1120,11 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
         "REGRAS DE RISCO:\n"
         "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
         "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
+        "REGRA MAIS IMPORTANTE (NÃO INVENTE AUTOMAÇÃO):\n"
+        "- Se o usuário pediu apenas orientação/explicação/dicas (ex: jogos, estudo, dúvidas), responda em texto: tool_calls=[] e risk=LOW.\n"
+        "- Só use tools de tela (screen.*), janela (win.focus_window) ou GUI (gui.* / screen.click_text) quando o usuário pedir explicitamente para ver/clicar/digitar na tela.\n"
+        "- Só use dev.* quando o usuário pedir explicitamente para executar/rodar comandos ou código.\n"
+        "- Nunca adivinhe window_title: só preencha window_title se o usuário fornecer o texto do título (ou substring) na mensagem.\n\n"
         "REGRAS ESPECÍFICAS:\n"
         "- Se usar discord.send_message, inclua antes um os.open_app com app='discord' para garantir que o Discord esteja aberto/em foco.\n\n"
         "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"

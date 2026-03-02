@@ -18,8 +18,9 @@ from omniscia.core.types import RiskLevel
 
 
 RouterMode = Literal["heuristic", "llm"]
-SttMode = Literal["text", "whisper_openai"]
+SttMode = Literal["text", "whisper_openai", "vosk"]
 TtsMode = Literal["none", "pyttsx3"]
+WakeWordMode = Literal["prefix", "anywhere", "smart"]
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,29 @@ class Settings:
     stt_record_seconds: float = 6.0
     stt_sample_rate: int = 16000
 
+    # STT (Vosk offline) — opcional/grátis
+    # Requer baixar um modelo e apontar a pasta.
+    stt_vosk_model_dir: str | None = None
+
+    # Áudio
+    # Dispositivo de entrada (microfone) por índice do sounddevice.
+    # Se None, usa o default do sistema.
+    audio_input_device: int | None = None
+    # Ganho do microfone aplicado no capture (útil quando o device vem muito baixo).
+    audio_input_gain: float = 1.0
+
+    # Wake word (voz)
+    # Quando ligado e STT estiver em modo voz, o agente só responde após ouvir o wake word.
+    wake_word_enabled: bool = False
+    wake_word: str = "void"
+    # prefix: "void ...", "ei void ..." (mais conservador)
+    # anywhere: atende se "void" aparecer em qualquer parte da frase
+    # smart: como anywhere, mas tenta evitar falsos positivos quando o usuário estiver falando de código
+    wake_word_mode: WakeWordMode = "prefix"
+    # Se true, ao ouvir apenas o wake word (sem comando) responde com um ack (ex: "Sim?").
+    wake_word_ack: bool = True
+    wake_word_ack_text: str = "Sim?"
+
     # Segurança
     hitl_enabled: bool = True
     hitl_min_risk: RiskLevel = RiskLevel.HIGH
@@ -63,6 +87,13 @@ class Settings:
 
     # Logs
     log_level: str = "INFO"
+
+    # Omega (confiabilidade)
+    # - Mantém defaults conservadores; ativar via OMNI_OMEGA=true.
+    omega_enabled: bool = False
+    retry_max_attempts: int = 1
+    retry_backoff_s: float = 0.35
+    retry_side_effect_tools: bool = False
 
     @staticmethod
     def load() -> "Settings":
@@ -112,6 +143,50 @@ class Settings:
         stt_openai_api_key = os.getenv("OMNI_STT_OPENAI_API_KEY") or None
         stt_openai_model = os.getenv("OMNI_STT_OPENAI_MODEL", "whisper-1").strip() or "whisper-1"
 
+        stt_vosk_model_dir = os.getenv("OMNI_STT_VOSK_MODEL_DIR") or None
+
+        audio_input_device_raw = (os.getenv("OMNI_AUDIO_INPUT_DEVICE") or "").strip()
+        if not audio_input_device_raw:
+            audio_input_device = None
+        else:
+            try:
+                audio_input_device = int(audio_input_device_raw)
+            except ValueError:
+                audio_input_device = None
+
+        audio_input_gain_raw = (os.getenv("OMNI_AUDIO_INPUT_GAIN") or "").strip()
+        if not audio_input_gain_raw:
+            audio_input_gain = 1.0
+        else:
+            try:
+                audio_input_gain = float(audio_input_gain_raw)
+            except ValueError:
+                audio_input_gain = 1.0
+
+        if audio_input_gain < 0.1:
+            audio_input_gain = 0.1
+        if audio_input_gain > 50.0:
+            audio_input_gain = 50.0
+
+        def _bool_env(name: str, default: bool) -> bool:
+            raw = (os.getenv(name) or "").strip().lower()
+            if not raw:
+                return default
+            if raw in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if raw in {"0", "false", "f", "no", "n", "off"}:
+                return False
+            return default
+
+        wake_word_enabled = _bool_env("OMNI_WAKE_WORD_ENABLED", False)
+        wake_word = (os.getenv("OMNI_WAKE_WORD", "void") or "void").strip() or "void"
+        wake_word_mode_raw = (os.getenv("OMNI_WAKE_WORD_MODE", "prefix") or "prefix").strip().lower()
+        wake_word_mode: WakeWordMode = "prefix"
+        if wake_word_mode_raw in {"prefix", "anywhere", "smart"}:
+            wake_word_mode = wake_word_mode_raw  # type: ignore[assignment]
+        wake_word_ack = _bool_env("OMNI_WAKE_WORD_ACK", True)
+        wake_word_ack_text = (os.getenv("OMNI_WAKE_WORD_ACK_TEXT", "Sim?") or "Sim?").strip() or "Sim?"
+
         def _float_env(name: str, default: float) -> float:
             raw = (os.getenv(name) or "").strip()
             if not raw:
@@ -135,10 +210,27 @@ class Settings:
 
         log_level = os.getenv("OMNI_LOG_LEVEL", "INFO").strip() or "INFO"
 
+        omega_enabled = (os.getenv("OMNI_OMEGA", "false").strip().lower() == "true")
+        retry_max_attempts = _int_env("OMNI_RETRY_MAX", 3 if omega_enabled else 1)
+        retry_backoff_s = _float_env("OMNI_RETRY_BACKOFF_S", 0.35)
+        retry_side_effect_tools = (
+            os.getenv("OMNI_RETRY_SIDE_EFFECTS", "false").strip().lower() == "true"
+        )
+
+        # Clamp básico para evitar valores absurdos.
+        if retry_max_attempts < 1:
+            retry_max_attempts = 1
+        if retry_max_attempts > 8:
+            retry_max_attempts = 8
+        if retry_backoff_s < 0.0:
+            retry_backoff_s = 0.0
+        if retry_backoff_s > 5.0:
+            retry_backoff_s = 5.0
+
         # Normalização mínima: evita valores inválidos explodirem silenciosamente.
         if router_mode not in ("heuristic", "llm"):
             router_mode = "heuristic"
-        if stt_mode not in ("text", "whisper_openai"):
+        if stt_mode not in ("text", "whisper_openai", "vosk"):
             stt_mode = "text"
         if tts_mode not in ("none", "pyttsx3"):
             tts_mode = "none"
@@ -155,6 +247,14 @@ class Settings:
             stt_openai_model=stt_openai_model,
             stt_record_seconds=stt_record_seconds,
             stt_sample_rate=stt_sample_rate,
+            stt_vosk_model_dir=stt_vosk_model_dir,
+            audio_input_device=audio_input_device,
+            audio_input_gain=audio_input_gain,
+            wake_word_enabled=wake_word_enabled,
+            wake_word=wake_word,
+            wake_word_mode=wake_word_mode,
+            wake_word_ack=wake_word_ack,
+            wake_word_ack_text=wake_word_ack_text,
             hitl_enabled=hitl_enabled,
             hitl_min_risk=hitl_min_risk,
             hitl_require_token=hitl_require_token,
@@ -164,4 +264,8 @@ class Settings:
             open_apps_file=open_apps_file,
             open_apps_json=open_apps_json,
             log_level=log_level,
+            omega_enabled=omega_enabled,
+            retry_max_attempts=retry_max_attempts,
+            retry_backoff_s=retry_backoff_s,
+            retry_side_effect_tools=retry_side_effect_tools,
         )

@@ -23,5 +23,9 @@ build/
 /data/tmp/
 /data/memory/
 
+# Local models / artifacts (não commitar)
+/data/models/
+/vosk-model-*/
+
 # Scratch (gerado por automações)
 scratch/

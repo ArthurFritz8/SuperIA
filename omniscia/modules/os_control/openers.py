@@ -446,9 +446,25 @@ def _os_open_url(args: dict[str, Any]) -> ToolResult:
 def _os_open_explorer(args: dict[str, Any]) -> ToolResult:
     raw = str(args.get("path", "."))
     try:
-        target = _safe_rel_path(raw)
-        if not target.exists() or not target.is_dir():
-            return ToolResult(status="error", error="path não existe ou não é diretório")
+        raw_norm = (raw or ".").strip().replace("\\", "/")
+        low = raw_norm.lower()
+
+        if low.startswith(("desktop:", "downloads:", "documents:")):
+            from omniscia.modules.os_control.filesystem import resolve_known_folder_prefixed_path
+
+            target = resolve_known_folder_prefixed_path(raw_norm)
+        else:
+            target = _safe_rel_path(raw_norm)
+
+        if not target.exists():
+            return ToolResult(status="error", error="path não existe")
+
+        # If it's a file, open its parent directory.
+        if target.is_file():
+            target = target.parent
+
+        if not target.is_dir():
+            return ToolResult(status="error", error="path não é diretório")
 
         if sys.platform.startswith("win"):
             os.startfile(str(target))  # noqa: S606

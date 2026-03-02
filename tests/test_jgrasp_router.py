@@ -68,3 +68,13 @@ def test_router_jgrasp_conta_defaults_to_math_code():
     assert [c.tool_name for c in plan.tool_calls] == ["jgrasp.write_code"]
     code = str(plan.tool_calls[0].args.get("code", ""))
     assert "class ContaMatematica" in code
+
+
+def test_router_modify_and_make_matrix_routes_to_write_code_without_jgrasp_word():
+    settings = Settings(router_mode="heuristic")
+    plan = route(settings, "modifique o codigo, apague o codigo e faça uma matriz agora")
+    assert plan.intent == "jgrasp.write_code"
+    assert plan.risk == RiskLevel.HIGH
+    assert [c.tool_name for c in plan.tool_calls] == ["jgrasp.write_code"]
+    code = str(plan.tool_calls[0].args.get("code", ""))
+    assert "class Matriz" in code

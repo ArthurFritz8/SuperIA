@@ -76,3 +76,33 @@ class JsonlMemoryStore:
                 continue
 
         return results
+
+
+    def recent(self, *, limit: int = 20) -> list[MemoryEvent]:
+        """Retorna eventos mais recentes.
+
+        Útil para depurar "o que o agente fez" sem precisar formular uma query.
+        """
+
+        if limit < 1:
+            return []
+        if limit > 200:
+            limit = 200
+
+        if not self._events_path.exists():
+            return []
+
+        lines = self._events_path.read_text(encoding="utf-8").splitlines()
+        out: list[MemoryEvent] = []
+        for line in reversed(lines):
+            try:
+                obj = json.loads(line)
+                out.append(
+                    MemoryEvent(ts=float(obj.get("ts", 0.0)), kind=str(obj.get("kind", "")), payload=obj.get("payload", {}) or {})
+                )
+                if len(out) >= limit:
+                    break
+            except Exception:
+                continue
+
+        return out

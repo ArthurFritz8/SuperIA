@@ -17,7 +17,9 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
+from dataclasses import replace
 from rich.console import Console
 from rich.panel import Panel
 
@@ -26,7 +28,10 @@ from omniscia.core.hitl import require_approval
 from omniscia.core.router import route
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
+from omniscia.core.wakeword import extract_after_wake_word
+from omniscia.core.chat_llm import chat_reply
 from omniscia.modules.stt.factory import build_stt
+from omniscia.modules.tts.factory import build_tts
 from omniscia.modules.memory.store import JsonlMemoryStore
 
 logger = logging.getLogger(__name__)
@@ -39,6 +44,7 @@ def run_brain_loop(settings: Settings) -> None:
     memory = JsonlMemoryStore()
     registry = build_default_registry(settings=settings, memory_store=memory)
     stt = build_stt(settings, console=console)
+    tts = build_tts(settings, console=console)
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
@@ -57,18 +63,63 @@ def run_brain_loop(settings: Settings) -> None:
             logger.exception("Falha no STT")
             console.print(f"[red]Erro no STT:[/red] {exc}")
             console.print("[yellow]Voltando para modo texto.[/yellow]")
-            settings = Settings(
-                **{**settings.__dict__, "stt_mode": "text"},  # type: ignore[arg-type]
-            )
+            settings = replace(settings, stt_mode="text")
             stt = build_stt(settings, console=console)
             continue
 
         if not user_message:
             continue
 
+        if stt.is_voice:
+            # Transparência: mostra o texto transcrito antes de agir.
+            console.print(f"[cyan]Você (voz)>[/cyan] {user_message}")
+
+            # Wake word: só atende quando for chamado (ex: "ei void ...").
+            if getattr(settings, "wake_word_enabled", False):
+                ok, cmd = extract_after_wake_word(
+                    user_message,
+                    wake_word=getattr(settings, "wake_word", "void"),
+                    mode=getattr(settings, "wake_word_mode", "prefix"),
+                )
+                if not ok:
+                    continue
+                if not cmd:
+                    if getattr(settings, "wake_word_ack", True):
+                        ack = str(getattr(settings, "wake_word_ack_text", "Sim?") or "Sim?").strip() or "Sim?"
+                        console.print(f"Agente> {ack}")
+                        if tts.enabled:
+                            try:
+                                tts.speak(ack)
+                            except Exception:
+                                logger.exception("Falha ao falar wake word ack (TTS)")
+                    continue
+                user_message = cmd
+
         memory.append("user_message", {"text": user_message})
 
         plan = route(settings, user_message)
+
+        # Para mensagens de orientação/conversa, responda diretamente com LLM (sem tools).
+        # Isso deixa o assistente muito mais "Jarvis" no dia-a-dia.
+        if plan.intent == "chat":
+            try:
+                history = _build_chat_history(memory, current_user_message=user_message)
+                response_text = chat_reply(settings, user_message, history=history)
+                console.print(f"Agente> {response_text}")
+                memory.append("agent_response", {"text": response_text})
+                if tts.enabled and response_text:
+                    try:
+                        t = response_text.strip()
+                        if len(t) > 400:
+                            t = t[:400] + "..."
+                        tts.speak(t)
+                    except Exception:
+                        logger.exception("Falha ao falar resposta (TTS)")
+                continue
+            except Exception as exc:  # noqa: BLE001
+                # Se o chat LLM falhar (config/deps/rede), cai no caminho antigo.
+                logger.exception("Falha no chat LLM")
+                console.print(f"[yellow]Chat LLM indisponível:[/yellow] {exc}")
 
         memory.append(
             "plan",
@@ -83,10 +134,73 @@ def run_brain_loop(settings: Settings) -> None:
             console.print(plan.final_response or "Encerrando.")
             return
 
-        _execute_plan(console, settings, registry, plan, memory)
+        # Session toggles (no tools, no HITL)
+        if plan.intent in {"core.omega_on", "core.omega_off"}:
+            enable = (plan.intent == "core.omega_on")
+            settings = replace(
+                settings,
+                omega_enabled=enable,
+                # Se ligar, ativa retries default; se desligar, volta ao conservador.
+                retry_max_attempts=(3 if enable else 1),
+            )
+            console.print(f"Agente> {plan.final_response or ('Modo omega ' + ('ativado' if enable else 'desativado') + '.')}")
+            memory.append(
+                "session_toggle",
+                {
+                    "omega_enabled": settings.omega_enabled,
+                    "retry_max_attempts": settings.retry_max_attempts,
+                    "retry_backoff_s": settings.retry_backoff_s,
+                    "retry_side_effect_tools": settings.retry_side_effect_tools,
+                },
+            )
+            continue
+
+        response_text = _execute_plan(console, settings, registry, plan, memory)
+        if tts.enabled and response_text:
+            # Evita falar textos gigantes acidentalmente.
+            t = response_text.strip()
+            if len(t) > 400:
+                t = t[:400] + "..."
+            try:
+                tts.speak(t)
+            except Exception:
+                logger.exception("Falha ao falar resposta (TTS)")
 
 
-def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> None:
+def _build_chat_history(memory: JsonlMemoryStore, *, current_user_message: str) -> list[dict[str, str]]:
+    """Monta um histórico curto para dar contexto ao chat.
+
+    Observações:
+    - Usamos apenas user_message/agent_response para não poluir com tool outputs.
+    - Limitamos o tamanho para reduzir custo/latência.
+    """
+
+    events = memory.recent(limit=30)
+
+    # Remove o último user_message (o atual), já que será adicionado separadamente.
+    if events:
+        e0 = events[0]
+        if e0.kind == "user_message" and str((e0.payload or {}).get("text", "")).strip() == str(current_user_message).strip():
+            events = events[1:]
+
+    msgs: list[dict[str, str]] = []
+    for e in reversed(events):
+        if e.kind == "user_message":
+            t = str((e.payload or {}).get("text", "") or "").strip()
+            if t:
+                msgs.append({"role": "user", "content": t})
+        elif e.kind == "agent_response":
+            t = str((e.payload or {}).get("text", "") or "").strip()
+            if t:
+                msgs.append({"role": "assistant", "content": t})
+
+    # Mantém apenas o rastro mais recente.
+    if len(msgs) > 10:
+        msgs = msgs[-10:]
+    return msgs
+
+
+def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> str | None:
     effective_risk = _effective_risk_for_plan(plan, registry, settings=settings)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
@@ -114,7 +228,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
             },
         )
         console.print("Agente> Não executei por segurança.")
-        return
+        return None
 
     if effective_plan.risk != plan.risk:
         memory.append(
@@ -139,26 +253,97 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         require_token=settings.hitl_require_token,
     ):
         console.print("Agente> Ok, não vou executar isso.")
-        return
+        return None
 
-    # Execução sequencial simples.
+    def _is_side_effect_tool(name: str) -> bool:
+        # Heurística conservadora: ferramentas que podem causar efeitos no SO.
+        # Retrys dessas ferramentas ficam desabilitados por padrão.
+        return bool(
+            name.startswith((
+                "gui.",
+                "discord.",
+                "jgrasp.",
+                "dev.",
+                "fs.delete",
+                "fs.move",
+                "fs.copy",
+                "write_file",
+                "screen.click_text",
+            ))
+            or name in {"os.open_app", "os.close_app", "os.open_url"}
+        )
+
+    def _should_retry(tool_name: str, err: str) -> bool:
+        # Só tenta retry quando:
+        # - o usuário ativou omega/retries (>1)
+        # - a tool é considerada segura (ou usuário permitiu side-effect retries)
+        # - erro parece transitório (timing/foco/deps momentâneas)
+        if settings.retry_max_attempts <= 1:
+            return False
+
+        side_effect = _is_side_effect_tool(tool_name)
+        if side_effect and not settings.retry_side_effect_tools:
+            return False
+
+        e = (err or "").lower()
+        transient_markers = [
+            "timeout",
+            "timed out",
+            "tempor",
+            "try again",
+            "tente novamente",
+            "not found",
+            "não encontrado",
+            "nao encontrado",
+            "falhou",
+            "failed",
+            "busy",
+            "ocupado",
+        ]
+        return any(m in e for m in transient_markers)
+
+    def _run_with_retry(call: ToolCall):
+        last = None
+        for attempt in range(1, settings.retry_max_attempts + 1):
+            if attempt > 1:
+                sleep_s = settings.retry_backoff_s * (attempt - 1)
+                if sleep_s:
+                    time.sleep(sleep_s)
+
+            result = registry.run(call.tool_name, call.args)
+            memory.append(
+                "tool_output",
+                {
+                    "tool": call.tool_name,
+                    "args": call.args,
+                    "attempt": attempt,
+                    "status": result.status,
+                    "output": result.output,
+                    "error": result.error,
+                },
+            )
+
+            if result.status == "ok":
+                return result
+
+            last = result
+            if not _should_retry(call.tool_name, str(result.error or "")):
+                break
+
+            console.print(
+                f"[yellow]Tool falhou (tentativa {attempt}/{settings.retry_max_attempts})[/yellow]: {call.tool_name}: {result.error}"
+            )
+
+        assert last is not None
+        return last
+
+    # Execução sequencial (com retry opcional).
     for call in normalized_plan.tool_calls:
-        result = registry.run(call.tool_name, call.args)
+        result = _run_with_retry(call)
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
             console.print("Agente> Tive um erro executando o plano.")
-            return
-
-        memory.append(
-            "tool_output",
-            {
-                "tool": call.tool_name,
-                "args": call.args,
-                "status": result.status,
-                "output": result.output,
-                "error": result.error,
-            },
-        )
+            return None
 
         # Observabilidade do MVP:
         # - Em agentes, tool output é parte essencial do feedback loop.
@@ -172,9 +357,11 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
     if normalized_plan.final_response:
         console.print(f"Agente> {normalized_plan.final_response}")
         memory.append("agent_response", {"text": normalized_plan.final_response})
+        return normalized_plan.final_response
     else:
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
+        return "Feito."
 
 
 def _normalize_plan_args(plan: Plan, *, settings: Settings) -> tuple[Plan, str | None]:
@@ -580,7 +767,7 @@ def _preflight_validate_tool_call(tool_name: str, args: dict, registry) -> str |
     try:
         registry.get(tool_name)
     except Exception:
-        return "tool não registrada"
+        return "tool não registrada (talvez dependência opcional não instalada). Rode: omniscia doctor"
 
     a = args or {}
 

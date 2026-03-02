@@ -29,6 +29,7 @@ class WhisperConfig:
     model: str = "whisper-1"
     record_seconds: float = 6.0
     sample_rate: int = 16000
+    input_device: int | None = None
 
 
 class WhisperOpenAIStt(SttProvider):
@@ -45,6 +46,7 @@ class WhisperOpenAIStt(SttProvider):
         audio_wav = _record_wav_bytes(
             record_seconds=self._cfg.record_seconds,
             sample_rate=self._cfg.sample_rate,
+            input_device=self._cfg.input_device,
         )
         return _whisper_transcribe(
             api_key=self._cfg.api_key,
@@ -53,7 +55,7 @@ class WhisperOpenAIStt(SttProvider):
         )
 
 
-def _record_wav_bytes(*, record_seconds: float, sample_rate: int) -> bytes:
+def _record_wav_bytes(*, record_seconds: float, sample_rate: int, input_device: int | None) -> bytes:
     """Captura áudio do microfone e retorna WAV em memória.
 
     Implementação:
@@ -81,7 +83,13 @@ def _record_wav_bytes(*, record_seconds: float, sample_rate: int) -> bytes:
     frames = int(max(0.5, record_seconds) * sample_rate)
 
     # Gravação bloqueante: simples e previsível para o MVP.
-    data = sd.rec(frames, samplerate=sample_rate, channels=1, dtype="float32")
+    data = sd.rec(
+        frames,
+        samplerate=sample_rate,
+        channels=1,
+        dtype="float32",
+        device=input_device,
+    )
     sd.wait()
 
     buf = io.BytesIO()

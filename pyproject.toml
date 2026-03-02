@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "omniscia"
 version = "0.1.0"
@@ -15,10 +19,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+dev = [
+  "pytest>=8.0",
+  "ruff>=0.6",
+  "pyright>=1.1",
+]
 voice = [
   "pyttsx3>=2.90",
   "sounddevice>=0.4",
   "soundfile>=0.12",
+  "vosk>=0.3.45",
 ]
 vision = [
   "mss>=9.0",
@@ -38,11 +48,46 @@ memory = [
   "keyring>=25",
 ]
 
+# Convenience meta-extra: install *everything* with one command.
+all = [
+  # dev
+  "pytest>=8.0",
+  "ruff>=0.6",
+  "pyright>=1.1",
+  # voice
+  "pyttsx3>=2.90",
+  "sounddevice>=0.4",
+  "soundfile>=0.12",
+  "vosk>=0.3.45",
+  # vision
+  "mss>=9.0",
+  "pillow>=10.3",
+  "pytesseract>=0.3",
+  # os
+  "pyautogui>=0.9",
+  # web
+  "playwright>=1.44",
+  # memory
+  "chromadb>=0.5",
+  "sentence-transformers>=3.0",
+  "cryptography>=42",
+  "keyring>=25",
+]
+
 [tool.ruff]
 line-length = 100
 
 [tool.pyright]
 typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.setuptools.packages.find]
+include = ["omniscia*"]
+exclude = ["data*", "scratch*", "build*", "dist*", "scripts*", "tests*"]
 
 [project.scripts]
 omniscia = "omniscia.app:main"

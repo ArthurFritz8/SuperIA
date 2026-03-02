@@ -24,6 +24,15 @@ def register_memory_tools(registry: ToolRegistry, store: JsonlMemoryStore) -> No
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="memory.recent",
+            description="Mostra eventos mais recentes da memória (timeline) sem query",
+            risk="LOW",
+            fn=lambda args: _memory_recent(args, store=store),
+        )
+    )
+
 
 def _memory_search(args: dict[str, Any], *, store: JsonlMemoryStore) -> ToolResult:
     query = str(args.get("query", "")).strip()
@@ -37,3 +46,14 @@ def _memory_search(args: dict[str, Any], *, store: JsonlMemoryStore) -> ToolResu
         out_lines.append(f"[{ev.kind}] {ev.payload}")
 
     return ToolResult(status="ok", output="\n".join(out_lines) if out_lines else "(sem resultados)")
+
+
+def _memory_recent(args: dict[str, Any], *, store: JsonlMemoryStore) -> ToolResult:
+    limit = int(args.get("limit", 20) or 20)
+    events = store.recent(limit=limit)
+
+    out_lines: list[str] = []
+    for ev in events:
+        out_lines.append(f"[{ev.kind}] {ev.payload}")
+
+    return ToolResult(status="ok", output="\n".join(out_lines) if out_lines else "(sem eventos)")

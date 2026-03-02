@@ -7,6 +7,7 @@ Rationale:
 Política de fallback:
 - Se `stt_mode=text`: sempre TextStt.
 - Se `stt_mode=whisper_openai` mas faltar API key/deps: mostra aviso e cai para TextStt.
+- Se `stt_mode=vosk` mas faltar modelo/deps: mostra aviso e cai para TextStt.
 """
 
 from __future__ import annotations
@@ -43,12 +44,40 @@ def build_stt(settings: Settings, *, console: Console) -> SttProvider:
                     model=settings.stt_openai_model,
                     record_seconds=settings.stt_record_seconds,
                     sample_rate=settings.stt_sample_rate,
+                    input_device=settings.audio_input_device,
                 )
             )
         except Exception:
             logger.exception("Falha ao inicializar Whisper STT; caindo para texto")
             console.print(
                 "[yellow]Falha ao iniciar STT Whisper (deps/microfone). Caindo para modo texto.[/yellow]"
+            )
+            return TextStt(console)
+
+    if settings.stt_mode == "vosk":
+        if not settings.stt_vosk_model_dir:
+            console.print(
+                "[yellow]STT Vosk selecionado, mas falta OMNI_STT_VOSK_MODEL_DIR. "
+                "Caindo para modo texto.[/yellow]"
+            )
+            return TextStt(console)
+
+        try:
+            from omniscia.modules.stt.vosk_offline import VoskConfig, VoskOfflineStt
+
+            return VoskOfflineStt(
+                config=VoskConfig(
+                    model_dir=settings.stt_vosk_model_dir,
+                    record_seconds=settings.stt_record_seconds,
+                    sample_rate=settings.stt_sample_rate,
+                    input_device=settings.audio_input_device,
+                    input_gain=settings.audio_input_gain,
+                )
+            )
+        except Exception:
+            logger.exception("Falha ao inicializar Vosk STT; caindo para texto")
+            console.print(
+                "[yellow]Falha ao iniciar STT Vosk (deps/modelo/microfone). Caindo para modo texto.[/yellow]"
             )
             return TextStt(console)
 

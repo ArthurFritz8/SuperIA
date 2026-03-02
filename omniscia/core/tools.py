@@ -119,6 +119,10 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             f"hitl_enabled={effective.hitl_enabled}",
             f"hitl_min_risk={effective.hitl_min_risk}",
             f"hitl_require_token={effective.hitl_require_token}",
+            f"omega_enabled={getattr(effective, 'omega_enabled', False)}",
+            f"retry_max_attempts={getattr(effective, 'retry_max_attempts', 1)}",
+            f"retry_backoff_s={getattr(effective, 'retry_backoff_s', 0.0)}",
+            f"retry_side_effect_tools={getattr(effective, 'retry_side_effect_tools', False)}",
             "",
             "== LLM ==",
             f"llm_provider={effective.llm_provider or ''}",
@@ -146,6 +150,32 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         lines = ["== Tools registradas =="]
         for spec in specs:
             lines.append(f"- {spec.name} (risk={spec.risk}): {spec.description}")
+        return ToolResult(status="ok", output="\n".join(lines))
+
+    def tool_help(args: dict[str, Any]) -> ToolResult:
+        lines = [
+            "== Ajuda (PT-BR) ==",
+            "Comandos úteis:",
+            "- ajuda  (esta tela)",
+            "- tools  (lista completa de tools)",
+            "- settings  (ver config efetiva)",
+            "",
+            "Omega/Jarvis (confiabilidade):",
+            "- ativa o modo omega  (retries em tools seguras)",
+            "- desativa o omega",
+            "",
+            "Arquivos/pastas (workspace):",
+            "- listar pasta data",
+            "- ler arquivo: README.md",
+            "- criar pasta na área de trabalho: PastaNova",
+            "",
+            "Visão:",
+            "- tire print da tela",
+            "- tire print da tela e salva na area de trabalho",
+            "",
+            "Projetos:",
+            "- crie um projeto python chamado MeuApp",
+        ]
         return ToolResult(status="ok", output="\n".join(lines))
 
     registry.register(
@@ -181,6 +211,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             description="Lista tools registradas (com risco e descrição)",
             risk="LOW",
             fn=tool_list_tools,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="core.help",
+            description="Mostra ajuda com exemplos de comandos",
+            risk="LOW",
+            fn=tool_help,
         )
     )
 

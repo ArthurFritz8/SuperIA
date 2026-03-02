@@ -256,6 +256,34 @@ def _safe_rel_subpath(raw: str) -> Path:
     return p
 
 
+def resolve_known_folder_prefixed_path(raw_path: str) -> Path:
+    """Resolve a path like 'desktop:/Pasta/Arquivo' to an absolute Path.
+
+    Guardrails:
+    - Only desktop:/, downloads:/, documents:/
+    - Subpath must be relative and cannot contain traversal
+    - Windows-only (uses Known Folders API)
+    """
+
+    s = (raw_path or "").strip().replace("\\", "/")
+    low = s.lower()
+    if not low.startswith(("desktop:", "downloads:", "documents:")):
+        raise ValueError("path não usa known folder prefix")
+
+    prefix, rest = s.split(":", 1)
+    base = _win_known_folder(prefix)
+    sub = _safe_rel_subpath(rest)
+    target = (base / sub).resolve()
+
+    # Extra safety: ensure the resolved target stays under the known folder.
+    try:
+        target.relative_to(base.resolve())
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError("path fora do known folder") from exc
+
+    return target
+
+
 def _safe_abs_windows_path(raw: str) -> Path:
     s = (raw or "").strip().strip('"').strip("'").replace("/", "\\")
     if not s:

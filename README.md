@@ -148,6 +148,20 @@ Obs: por padrão, URLs precisam incluir `http://` ou `https://`. Opcionalmente, 
 
 - `pip install -r requirements.txt`
 
+### Instalar TUDO (ultra mega power)
+
+Para instalar *todas* as features opcionais (GUI/OS, web, OCR/visão, voz, memória) + ferramentas de dev (pytest/ruff/pyright):
+
+- `pip install -e ".[all]"`
+
+Se você for usar automação web, instale também os browsers do Playwright:
+
+- `python -m playwright install`
+
+No Windows, atalho:
+
+- [scripts/windows/setup_all.bat](scripts/windows/setup_all.bat)
+
 3) Execute:
 
 - `python -m omniscia.app`

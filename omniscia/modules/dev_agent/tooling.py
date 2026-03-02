@@ -18,6 +18,7 @@ from omniscia.core.types import ToolResult
 from omniscia.modules.dev_agent.sandbox import parse_command, python_argv, run_command
 from omniscia.modules.dev_agent.autofix import autofix_python_file
 from omniscia.modules.dev_agent.autofix_cmd import autofix_command
+from omniscia.modules.dev_agent.scaffold import scaffold_python_project
 
 # Import leve: Settings vem do core e não puxa dependências pesadas.
 from omniscia.core.config import Settings
@@ -57,6 +58,15 @@ def register_dev_tools(registry: ToolRegistry) -> None:
             description="Roda um comando (ex: pytest) e tenta auto-corrigir via LLM (opcional)",
             risk="HIGH",
             fn=_dev_autofix_cmd,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="dev.scaffold_project",
+            description="Cria um projeto Python minimalista (src layout + pytest) no workspace",
+            risk="HIGH",
+            fn=scaffold_python_project,
         )
     )
 
