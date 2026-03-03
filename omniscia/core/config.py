@@ -36,6 +36,12 @@ class Settings:
     # I/O
     stt_mode: SttMode = "text"
     tts_mode: TtsMode = "none"
+    
+    # TTS behavior (separado do engine). Defaults silenciosos.
+    # Mesmo com OMNI_TTS_MODE=pyttsx3, só fala se esses flags estiverem true.
+    tts_speak_responses: bool = False
+    tts_speak_alerts: bool = False
+    tts_speak_wake_ack: bool = False
 
     # STT (Whisper API) — opcional
     stt_openai_api_key: str | None = None
@@ -252,6 +258,11 @@ class Settings:
         proactive_cpu_threshold = _int_env("OMNI_PROACTIVE_CPU_THRESHOLD", 95)
         proactive_ram_threshold = _int_env("OMNI_PROACTIVE_RAM_THRESHOLD", 95)
         vlm_enabled = _bool_env("OMNI_VLM_ENABLED", False)
+        
+        # TTS: comportamento de fala (separado do engine)
+        tts_speak_responses = _bool_env("OMNI_TTS_SPEAK_RESPONSES", False)
+        tts_speak_alerts = _bool_env("OMNI_TTS_SPEAK_ALERTS", False)
+        tts_speak_wake_ack = _bool_env("OMNI_TTS_SPEAK_WAKE_ACK", False)
 
         if proactive_interval_s < 30:
             proactive_interval_s = 30
@@ -291,6 +302,9 @@ class Settings:
             llm_api_key=llm_api_key,
             stt_mode=stt_mode,  # type: ignore[arg-type]
             tts_mode=tts_mode,  # type: ignore[arg-type]
+            tts_speak_responses=tts_speak_responses,
+            tts_speak_alerts=tts_speak_alerts,
+            tts_speak_wake_ack=tts_speak_wake_ack,
 
             stt_openai_api_key=stt_openai_api_key,
             stt_openai_model=stt_openai_model,

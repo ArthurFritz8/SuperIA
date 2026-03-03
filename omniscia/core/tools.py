@@ -134,6 +134,9 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             f"stt_openai_api_key_set={_is_set(effective.stt_openai_api_key)}",
             f"stt_openai_model={effective.stt_openai_model}",
             f"tts_mode={effective.tts_mode}",
+            f"tts_speak_responses={getattr(effective, 'tts_speak_responses', False)}",
+            f"tts_speak_alerts={getattr(effective, 'tts_speak_alerts', False)}",
+            f"tts_speak_wake_ack={getattr(effective, 'tts_speak_wake_ack', False)}",
             "",
             "== Web/OCR ==",
             f"web_headless={effective.web_headless}",
@@ -159,6 +162,8 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             "- ajuda  (esta tela)",
             "- tools  (lista completa de tools)",
             "- settings  (ver config efetiva)",
+            "- ativar voz  (fala as respostas)",
+            "- silenciar  (modo silencioso)",
             "",
             "Omega/Jarvis (confiabilidade):",
             "- ativa o modo omega  (retries em tools seguras)",
@@ -172,6 +177,11 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             "Visão:",
             "- tire print da tela",
             "- tire print da tela e salva na area de trabalho",
+            "",
+            "PDF -> Word (automação):",
+            "- faça as atividades do PDF \"Aula 01 - Atividades.pdf\" no Word  (digita no Word)",
+            "- faça as atividades do PDF \"Aula 01 - Atividades.pdf\" e gere um arquivo docx",
+            "- faça as atividades do PDF \"Aula 01 - Atividades.pdf\" e gere um arquivo pdf",
             "",
             "Projetos:",
             "- crie um projeto python chamado MeuApp",
@@ -313,6 +323,30 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             register_ocr_tools(registry, settings)
         except Exception:
             logger.info("OCR tools indisponíveis (erro ao importar/registrar).")
+
+    # Tools de jogos (ex.: T-Rex autoplay)
+    try:
+        from omniscia.modules.games.trex import register_game_tools
+
+        register_game_tools(registry)
+    except Exception:
+        logger.info("Game tools indisponíveis (erro ao importar/registrar).")
+
+    # Framework de jogos por perfis
+    try:
+        from omniscia.modules.games.profiles import register_game_profile_tools
+
+        register_game_profile_tools(registry)
+    except Exception:
+        logger.info("Game profile tools indisponíveis (erro ao importar/registrar).")
+
+    # Educação / automação assistida (OCR + Word)
+    try:
+        from omniscia.modules.education.pdf_word_autofill import register_edu_tools
+
+        register_edu_tools(registry)
+    except Exception:
+        logger.info("Edu tools indisponíveis (erro ao importar/registrar).")
 
     # Registro opcional de ferramentas web.
     # Import lazy para evitar dependência dura de Playwright neste estágio.

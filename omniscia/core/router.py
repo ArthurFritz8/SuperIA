@@ -80,6 +80,15 @@ def route(settings: Settings, user_message: str) -> Plan:
         "gui.click",
         "gui.click_box_center",
         "gui.type_text",
+        "gui.press_key",
+        # Games
+        "game.trex_autoplay",
+        "game.autoplay",
+        "game.list_profiles",
+        "game.save_profile",
+        "game.calibrate_runner_from_mouse",
+        # Education
+        "edu.pdf_word_autofill",
         # Web read-only
         "web.get_page_text",
         "win.focus_window",
@@ -95,6 +104,8 @@ def route(settings: Settings, user_message: str) -> Plan:
         # Session toggles
         "core.omega_on",
         "core.omega_off",
+        "core.voice_on",
+        "core.voice_off",
         "core.help",
     }
     if heuristic.intent in deterministic_intents:
@@ -141,7 +152,10 @@ def route_llm(
         # Só libera tools quando houver pedido explícito (imperativo) ou ação (clicar/digitar).
 
         # Pedidos explícitos de clique/teclado.
-        if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite)\b", n):
+        if re.search(
+            r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite|aperta|apertar|pressione|pressionar|pule|pular|jogue|jogar)\b",
+            n,
+        ):
             return True
 
         # Pedidos explícitos de screenshot/OCR.
@@ -216,6 +230,21 @@ def _route_heuristic(user_message: str) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
 
+    # Entradas só-numéricas (usuário tentando "escolher um passo" ou responder menu).
+    # O MVP não tem UX de menu por números, então damos um caminho claro.
+    if re.fullmatch(r"\d{1,3}", norm or ""):
+        return Plan(
+            intent="chat",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response=(
+                "Eu não uso números como seleção de menu. "
+                "Se você quer que eu execute a automação, repita o pedido completo (ex.: 'faça as atividades do PDF no Word'), "
+                "ou diga explicitamente: 'pode executar agora' depois de colocar o PDF em foco."
+            ),
+        )
+
     def _guess_name_from_text(text: str) -> str | None:
         # quoted "Meu Projeto"
         q = re.search(r"['\"]([^'\"]{2,60})['\"]", text)
@@ -249,6 +278,262 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[],
             risk=RiskLevel.LOW,
             final_response="Ok — modo omega desativado nesta sessão.",
+        )
+
+    # Regra: comandos de voz (TTS) em runtime
+    # Importante: isso NÃO liga STT; apenas habilita/desabilita falar respostas.
+    if re.search(r"\b(silenciar|mute|sem\s+voz|tirar\s+voz|desativar\s+voz|desliga\s+a\s+voz)\b", norm):
+        return Plan(
+            intent="core.voice_off",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — voz desativada (modo silencioso).",
+        )
+
+    if re.search(r"\b(ativar\s+voz|liga\s+a\s+voz|ligar\s+voz|falar\s+resposta|fala\s+as\s+respostas)\b", norm):
+        return Plan(
+            intent="core.voice_on",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — voz ativada para respostas (se disponível).",
+        )
+
+    def _guess_output_filename_for_ext(text: str, ext: str) -> str | None:
+        # Prefer the *last* match for the requested extension.
+        # Rationale: the message may contain the source PDF title and the desired output filename.
+        ext = (ext or "").strip().lower().lstrip(".")
+        if ext not in {"docx", "pdf"}:
+            return None
+
+        quoted = re.findall(rf"['\"]([^'\"]{{3,140}}\.{ext})['\"]", text, flags=re.IGNORECASE)
+        if quoted:
+            return (quoted[-1] or "").strip()
+
+        bare = re.findall(rf"\b([^\s]{{3,140}}\.{ext})\b", text, flags=re.IGNORECASE)
+        if bare:
+            return (bare[-1] or "").strip()
+
+        return None
+
+    def _guess_pdf_title(text: str) -> str:
+        pdf_title = ""
+        q = re.search(r"['\"]([^'\"]{3,120}\.pdf)['\"]", text, flags=re.IGNORECASE)
+        if q:
+            pdf_title = (q.group(1) or "").strip()
+        else:
+            m = re.search(r"\b([^\s]{3,120}\.pdf)\b", text, flags=re.IGNORECASE)
+            if m:
+                pdf_title = (m.group(1) or "").strip()
+        return pdf_title
+
+    def _guess_word_title(text: str) -> str:
+        word_title = "Word"
+        wq = re.search(r"word\s*[:=]\s*['\"]([^'\"]{2,80})['\"]", text, flags=re.IGNORECASE)
+        if wq:
+            word_title = (wq.group(1) or "Word").strip() or "Word"
+        return word_title
+
+    # Regra: PDF (Google/Chrome) -> Word (digitar) ou gerar arquivo (.docx/.pdf)
+    # Pedido explícito do usuário: ler/rolar o PDF e preencher/organizar as atividades.
+    if re.search(r"\b(pdf)\b", norm) and re.search(
+        r"\b(atividade|atividades|quest(ao|oes)|fazer|fa(c|ç)a|resolver|resolva|escrever|escreva)\b",
+        norm,
+    ):
+        pdf_title = _guess_pdf_title(msg)
+        assume_focused_pdf = False
+        if not pdf_title:
+            # UX melhor: se o usuário não souber o nome do arquivo, dá pra rodar assumindo
+            # que ele colocou a janela do PDF em foco (ele vai aprovar via HITL antes).
+            assume_focused_pdf = True
+
+        wants_word = bool(re.search(r"\b(word)\b", norm))
+
+        # Arquivo Word (.docx) pode aparecer como "docx", "docxs", ".docx" ou "arquivo do word".
+        wants_docx = bool(
+            re.search(r"\b(docx|docxs|\.docx)\b", norm)
+            or (
+                re.search(r"\b(gerar|criar|exportar|salvar|gera|gere|crie)\b", norm)
+                and re.search(r"\b(arquivo|documento)\b", norm)
+                and re.search(r"\b(word)\b", norm)
+            )
+        )
+
+        # Arquivo PDF de saída: aceitar "gere um pdf" mesmo sem a palavra "arquivo".
+        wants_pdf_file = bool(
+            re.search(r"\b(gerar|criar|exportar|salvar|gera|gere|crie)\b", norm)
+            and (
+                re.search(r"\b(um\s+pdf|em\s+pdf|pdf)\b", norm)
+                or ".pdf" in norm
+            )
+        )
+
+        wants_desktop = bool(re.search(r"\b(área\s+de\s+trabalho|area\s+de\s+trabalho|desktop)\b", norm))
+
+        # Opt-in para respostas completas via LLM quando o usuário pedir explicitamente "responda/solucione".
+        wants_answers = bool(
+            re.search(r"\b(responda|responder|respostas|solucione|solucionar|complete|completo|passo\s*a\s*passo)\b", norm)
+        )
+
+        # Se o usuário mencionou Word e não pediu explicitamente arquivo, digitamos no Word.
+        if wants_word and not wants_docx and not wants_pdf_file:
+            word_title = _guess_word_title(msg)
+            return Plan(
+                intent="edu.pdf_word_autofill",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="edu.pdf_word_autofill",
+                        args={
+                            "pdf_title_contains": pdf_title,
+                            "assume_focused_pdf": assume_focused_pdf,
+                            "word_title_contains": word_title,
+                            "output_mode": "word",
+                            "solve_with_llm": wants_answers,
+                            "llm_max_questions": 14,
+                            "max_scrolls": 22,
+                            "duration_s": 45.0,
+                            "settle_ms": 650,
+                        },
+                    )
+                ],
+                risk=RiskLevel.HIGH,
+                final_response=(
+                    "Ok — vou ler o PDF (OCR + rolagem) e preencher organizado no Word (requer aprovação). "
+                    + (
+                        "Antes de aprovar: clique na janela do PDF para ela ficar em foco. "
+                        if assume_focused_pdf
+                        else ""
+                    )
+                    + "Dica: deixe o PDF visível em 100%-125% e o Word aberto."
+                ),
+            )
+
+        # Caso contrário, só gera arquivo quando o usuário pediu explicitamente docx/pdf.
+        if wants_docx or wants_pdf_file:
+            output_mode = "docx" if wants_docx else "pdf"
+            out_name = _guess_output_filename_for_ext(msg, output_mode)
+            # Evita capturar o PDF de entrada como nome do arquivo de saída.
+            if out_name and out_name.strip().lower() == pdf_title.strip().lower():
+                out_name = None
+
+            if not out_name:
+                if wants_desktop:
+                    out_name = "desktop:/atividades.docx" if output_mode == "docx" else "desktop:/atividades.pdf"
+                else:
+                    out_name = "data/tmp/atividades.docx" if output_mode == "docx" else "data/tmp/atividades.pdf"
+            elif "/" not in out_name and "\\" not in out_name:
+                # Se o usuário só deu o nome do arquivo, coloca em data/tmp (ou Desktop se pedido).
+                out_name = f"desktop:/{out_name}" if wants_desktop else f"data/tmp/{out_name}"
+            else:
+                # Se ele forneceu um path, respeitamos; mas se pediu Desktop e não usou prefixo,
+                # damos preferência ao prefixo (mais portátil/seguro) quando possível.
+                if wants_desktop and not out_name.lower().startswith(("desktop:/", "downloads:/", "documents:/")):
+                    leaf = out_name.replace("\\", "/").split("/")[-1]
+                    if leaf and "." in leaf:
+                        out_name = f"desktop:/{leaf}"
+
+            return Plan(
+                intent="edu.pdf_word_autofill",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="edu.pdf_word_autofill",
+                        args={
+                            "pdf_title_contains": pdf_title,
+                            "assume_focused_pdf": assume_focused_pdf,
+                            "output_mode": output_mode,
+                            "out_path": out_name,
+                            "overwrite": True,
+                            "solve_with_llm": wants_answers,
+                            "llm_max_questions": 14,
+                            "max_scrolls": 22,
+                            "duration_s": 45.0,
+                            "settle_ms": 650,
+                        },
+                    )
+                ],
+                risk=RiskLevel.HIGH,
+                final_response=(
+                    f"Ok — vou ler o PDF (OCR + rolagem) e gerar um arquivo {output_mode.upper()} (requer aprovação). "
+                    + ("Antes de aprovar: clique na janela do PDF para ela ficar em foco. " if assume_focused_pdf else "")
+                    + "Dica: deixe o PDF visível em 100%-125%."
+                ),
+            )
+
+    # Regra: jogar o T-Rex (Chrome Dino) explicitamente
+    # Mantemos determinístico para funcionar mesmo sem LLM (quota/rate limit).
+    if re.search(r"\b(jogue|jogar|joga|joguei)\b", norm) and re.search(
+        r"\b(t\s*-?\s*rex|trex|dino|dinossauro|chrome\s*dino|jogo\s*do\s*dinossauro)\b",
+        norm,
+    ):
+        title_contains = None
+        # Se o usuário fornecer um título de janela entre aspas, usamos como hint.
+        q = re.search(r"['\"]([^'\"]{2,80})['\"]", msg)
+        if q:
+            title_contains = (q.group(1) or "").strip()
+
+        args: dict[str, Any] = {"duration_s": 30.0, "settle_ms": 450}
+        if title_contains:
+            args["title_contains"] = title_contains
+
+        return Plan(
+            intent="game.trex_autoplay",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="game.trex_autoplay", args=args)],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou tentar jogar o T‑Rex automaticamente por ~30s (requer aprovação).",
+        )
+
+    # Regra: automação genérica de jogo (perfil/template)
+    # Observação: não tentamos automação em contexto explicitamente online/competitivo.
+    if re.search(r"\b(jogue|jogar|joga)\b", norm) and re.search(r"\b(jogo|game)\b", norm):
+        if re.search(r"\b(online|competitivo|ranked|ranqueado|anti\s*-?cheat|multiplayer|pvp)\b", norm):
+            return Plan(
+                intent="chat",
+                user_message=msg,
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response=(
+                    "Posso orientar em texto, mas não vou automatizar jogos online/competitivos. "
+                    "Se for um jogo offline/solo ou um jogo de navegador simples, diga isso explicitamente."
+                ),
+            )
+
+        # Tenta inferir um nome de perfil simples.
+        q = re.search(r"['\"]([^'\"]{2,60})['\"]", msg)
+        profile = (q.group(1).strip().lower() if q else "")
+
+        # Se o usuário não forneceu um profile, fazemos calibração runner rápida via mouse.
+        if not profile and re.search(r"\b(qualquer|qualquer\s+jogo)\b", norm):
+            tmp_profile = "runner"
+            return Plan(
+                intent="game.autoplay",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="game.calibrate_runner_from_mouse", args={"name": tmp_profile, "jump_key": "space"}),
+                    ToolCall(tool_name="game.autoplay", args={"profile": tmp_profile, "duration_s": 30.0, "settle_ms": 450}),
+                ],
+                risk=RiskLevel.HIGH,
+                final_response=(
+                    "Ok — antes de aprovar, coloque o mouse em cima do personagem do jogo. "
+                    "Vou calibrar (runner) e jogar por ~30s (requer aprovação)."
+                ),
+            )
+
+        args: dict[str, Any] = {"duration_s": 30.0, "settle_ms": 450}
+        if profile:
+            args["profile"] = profile
+        else:
+            args["template"] = "runner"
+
+        return Plan(
+            intent="game.autoplay",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="game.autoplay", args=args)],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou tentar jogar automaticamente por ~30s (requer aprovação).",
         )
 
     def _strip_quotes(s: str) -> str:

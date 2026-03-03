@@ -85,7 +85,7 @@ def run_brain_loop(settings: Settings) -> None:
                 # Apenas alerta + pergunta; sem ações automáticas.
                 memory.append("proactive_alert", {"text": msg})
                 console.print(f"\n[bold yellow]VOID>[/bold yellow] {msg}")
-                if tts.enabled:
+                if tts.enabled and getattr(settings, "tts_speak_alerts", False):
                     try:
                         with tts_lock:
                             tts.speak(msg[:220] + ("..." if len(msg) > 220 else ""))
@@ -197,7 +197,7 @@ def run_brain_loop(settings: Settings) -> None:
                     if getattr(settings, "wake_word_ack", True):
                         ack = str(getattr(settings, "wake_word_ack_text", "Sim?") or "Sim?").strip() or "Sim?"
                         console.print(f"Agente> {ack}")
-                        if tts.enabled:
+                        if tts.enabled and getattr(settings, "tts_speak_wake_ack", False):
                             try:
                                 tts.speak(ack)
                             except Exception:
@@ -283,7 +283,7 @@ def run_brain_loop(settings: Settings) -> None:
                         assistant_response=response_text,
                     )
 
-                if tts.enabled and response_text:
+                if tts.enabled and getattr(settings, "tts_speak_responses", False) and response_text:
                     try:
                         t = response_text.strip()
                         if len(t) > 400:
@@ -332,13 +332,55 @@ def run_brain_loop(settings: Settings) -> None:
             )
             continue
 
+        # Voice toggles (TTS) — não usa tools, não passa por HITL.
+        if plan.intent in {"core.voice_on", "core.voice_off"}:
+            enable = (plan.intent == "core.voice_on")
+
+            if enable:
+                # Liga engine + fala respostas (apenas). Alertas e wake ack continuam desligados.
+                settings = replace(
+                    settings,
+                    tts_mode="pyttsx3",
+                    tts_speak_responses=True,
+                    tts_speak_alerts=False,
+                    tts_speak_wake_ack=False,
+                )
+            else:
+                # Silencia total + desliga engine.
+                settings = replace(
+                    settings,
+                    tts_mode="none",
+                    tts_speak_responses=False,
+                    tts_speak_alerts=False,
+                    tts_speak_wake_ack=False,
+                )
+
+            # Recria provider com as novas settings.
+            tts = build_tts(settings, console=console)
+
+            msg = plan.final_response or ("Voz ativada." if enable else "Voz desativada.")
+            if enable and not getattr(tts, "enabled", False):
+                msg = msg + " (TTS não disponível neste ambiente.)"
+            console.print(f"Agente> {msg}")
+            memory.append(
+                "voice_toggle",
+                {
+                    "tts_mode": settings.tts_mode,
+                    "tts_speak_responses": getattr(settings, "tts_speak_responses", False),
+                    "tts_speak_alerts": getattr(settings, "tts_speak_alerts", False),
+                    "tts_speak_wake_ack": getattr(settings, "tts_speak_wake_ack", False),
+                    "tts_enabled": getattr(tts, "enabled", False),
+                },
+            )
+            continue
+
         # ReAct (modo llm): executa tools em um loop e replaneja com base nos outputs.
         # No modo heurístico, mantemos execução linear de um plano fixo.
         if settings.router_mode == "llm" and plan.tool_calls:
             response_text = _execute_plan_react(console, settings, registry, plan, memory)
         else:
             response_text = _execute_plan(console, settings, registry, plan, memory)
-        if tts.enabled and response_text:
+        if tts.enabled and getattr(settings, "tts_speak_responses", False) and response_text:
             # Evita falar textos gigantes acidentalmente.
             t = response_text.strip()
             if len(t) > 400:
@@ -684,6 +726,13 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
     original_user_message = (plan.user_message or "").strip()
     current_plan = plan
 
+    # Algumas tools são "single-shot" (fazem o trabalho inteiro em uma chamada).
+    # Se elas forem executadas com sucesso num plano determinístico (intent == tool_name),
+    # não replanejamos via LLM para evitar respostas genéricas e rate limits.
+    single_shot_tools = {
+        "edu.pdf_word_autofill",
+    }
+
     # Mantém um rastro curto para dar ao LLM.
     trace_messages: list[dict[str, str]] = []
 
@@ -730,6 +779,17 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
             if len(out) > 2000:
                 out = out[:2000] + "\n... [truncado]"
             console.print(Panel(out, title=f"Tool: {call.tool_name}"))
+
+        # Short-circuit: deterministic single-shot tool finished successfully.
+        if (
+            result.status == "ok"
+            and call.tool_name in single_shot_tools
+            and (current_plan.intent or "").strip() == call.tool_name
+        ):
+            text = (result.output or "").strip() or "Feito."
+            console.print(f"Agente> {text}")
+            memory.append("agent_response", {"text": text})
+            return text
 
         # Alimenta o LLM com um resumo do que aconteceu.
         out_short = (result.output or "").strip()

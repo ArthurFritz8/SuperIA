@@ -67,6 +67,15 @@ def register_gui_tools(registry: ToolRegistry) -> None:
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="gui.press_key",
+            description="Pressiona uma tecla (ex: space, up, down, enter)",
+            risk="HIGH",
+            fn=_gui_press_key,
+        )
+    )
+
 
 def _require_pyautogui():
     try:
@@ -191,3 +200,32 @@ def _gui_type_text(args: dict[str, Any]) -> ToolResult:
     # `write` simula digitação humana (menos suspeito em alguns contextos)
     pyautogui.write(text, interval=0.01)
     return ToolResult(status="ok", output=f"typed {len(text)} chars")
+
+
+def _gui_press_key(args: dict[str, Any]) -> ToolResult:
+    pyautogui, err = _require_pyautogui()
+    if pyautogui is None:
+        return ToolResult(status="error", error=err)
+
+    key = str(args.get("key", "") or "").strip().lower()
+    presses = int(args.get("presses", 1) or 1)
+    interval = float(args.get("interval", 0.0) or 0.0)
+
+    if not key:
+        return ToolResult(status="error", error="key vazio")
+    if len(key) > 20:
+        return ToolResult(status="error", error="key muito longa")
+    if presses < 1:
+        presses = 1
+    if presses > 20:
+        presses = 20
+    if interval < 0.0:
+        interval = 0.0
+    if interval > 1.0:
+        interval = 1.0
+
+    try:
+        pyautogui.press(key, presses=presses, interval=interval)
+        return ToolResult(status="ok", output=f"pressed {key} x{presses}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
