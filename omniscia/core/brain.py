@@ -31,6 +31,7 @@ from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
 from omniscia.core.chat_llm import chat_reply
+from omniscia.core.workers import WorkerManager
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.tts.factory import build_tts
 from omniscia.modules.memory.store import JsonlMemoryStore
@@ -46,6 +47,19 @@ def run_brain_loop(settings: Settings) -> None:
     registry = build_default_registry(settings=settings, memory_store=memory)
     stt = build_stt(settings, console=console)
     tts = build_tts(settings, console=console)
+
+    # Permissões por sessão (não persistem no .env): auto-programação / tools custom.
+    session_self_coding_granted = False
+
+    # Workers (background) — permite continuar conversando durante automações longas.
+    worker_mgr: WorkerManager | None = None
+    if getattr(settings, "workers_enabled", False):
+        try:
+            worker_mgr = WorkerManager(max_workers=int(getattr(settings, "workers_max", 2) or 2))
+            console.print("[dim]Workers habilitados (background jobs). Use: jobs | job <id> | cancel <id>[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Workers indisponíveis:[/yellow] {exc}")
+            worker_mgr = None
 
     # Lock para evitar concorrência no TTS (alguns engines não são thread-safe).
     tts_lock = threading.Lock()
@@ -76,6 +90,12 @@ def run_brain_loop(settings: Settings) -> None:
         except Exception as exc:  # noqa: BLE001
             console.print(f"[yellow]Hotkey indisponível:[/yellow] {exc}")
 
+    # Rewind multimodal (opt-in): sob demanda (não inicia sozinho).
+    if getattr(settings, "rewind_enabled", False):
+        console.print(
+            f"[dim]Rewind disponível (sob demanda): buffer ~{getattr(settings, 'rewind_seconds', 60)}s, intervalo {getattr(settings, 'rewind_interval_s', 3.0)}s. Use: 'comece a monitorar a tela' | 'pare o monitoramento'.[/dim]"
+        )
+
     # Proatividade (opt-in): alerta quando CPU/RAM estiverem muito altas.
     if getattr(settings, "proactive_enabled", False):
         try:
@@ -105,6 +125,30 @@ def run_brain_loop(settings: Settings) -> None:
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
     while True:
+        # Notificações de jobs finalizados.
+        if worker_mgr is not None:
+            for n in worker_mgr.pop_notifications(max_items=8):
+                msg = f"JOB {n.job_id} ({n.name}) => {n.status.upper()} ({n.duration_s:.1f}s)"
+                if n.output:
+                    snip = n.output.strip()
+                    if len(snip) > 300:
+                        snip = snip[:300] + "..."
+                    msg = msg + "\n" + snip
+                if n.error:
+                    msg = msg + "\nErro: " + str(n.error)[:300]
+                console.print(Panel(msg, title="Background job"))
+                memory.append(
+                    "worker_job_done",
+                    {
+                        "job_id": n.job_id,
+                        "name": n.name,
+                        "status": n.status,
+                        "duration_s": n.duration_s,
+                        "output": n.output,
+                        "error": n.error,
+                    },
+                )
+
         hotkey_image_path: str | None = None
         hotkey_ocr_text: str | None = None
         try:
@@ -127,6 +171,44 @@ def run_brain_loop(settings: Settings) -> None:
 
         if not user_message:
             continue
+
+        # Comandos locais para workers (não passam por router/LLM).
+        if worker_mgr is not None:
+            um = user_message.strip()
+            if um.lower() in {"jobs", "job", "trabalhos"}:
+                jobs = worker_mgr.list_jobs()
+                if not jobs:
+                    console.print("Agente> Nenhum job em background.")
+                    continue
+                lines = ["== Jobs =="]
+                now = time.time()
+                for j in jobs[-12:]:
+                    age = now - float(j.created_ts)
+                    lines.append(f"- {j.job_id} {j.name} status={j.status} age_s={age:.0f}")
+                console.print(Panel("\n".join(lines), title="Workers"))
+                continue
+
+            mjob = re.fullmatch(r"job\s+([0-9a-fA-F]{6,12})", um.strip(), flags=re.IGNORECASE)
+            if mjob:
+                jid = mjob.group(1)
+                info = worker_mgr.get_info(jid)
+                if info is None:
+                    console.print("Agente> Job não encontrado.")
+                else:
+                    console.print(
+                        Panel(
+                            f"job_id={info.job_id}\nname={info.name}\nstatus={info.status}\ndone={info.done}",
+                            title="Job",
+                        )
+                    )
+                continue
+
+            mcancel = re.fullmatch(r"cancel\s+([0-9a-fA-F]{6,12})", um.strip(), flags=re.IGNORECASE)
+            if mcancel:
+                jid = mcancel.group(1)
+                ok = worker_mgr.cancel(jid)
+                console.print("Agente> " + ("Ok, tentei cancelar." if ok else "Não consegui cancelar (talvez já esteja rodando/finalizado)."))
+                continue
 
         # Se a hotkey foi pressionada, capturamos contexto de tela antes de rotear.
         if screen_hotkey_flag.is_set():
@@ -376,10 +458,46 @@ def run_brain_loop(settings: Settings) -> None:
 
         # ReAct (modo llm): executa tools em um loop e replaneja com base nos outputs.
         # No modo heurístico, mantemos execução linear de um plano fixo.
+
+        # Permissão por sessão (auto-programação):
+        # Se o usuário pedir dev.genesis/dev.create_tool e o .env estiver conservador,
+        # perguntamos uma vez por sessão e habilitamos somente nesta sessão.
+        needs_self_coding = any(
+            (c.tool_name or "") in {"dev.create_tool", "dev.genesis"} for c in (plan.tool_calls or [])
+        )
+        if needs_self_coding and not session_self_coding_granted:
+            if not (getattr(settings, "self_coding_enabled", False) and getattr(settings, "custom_tools_enabled", False)):
+                console.print(
+                    "[yellow]Auto-programação solicitada.[/yellow] Você está me pedindo para criar/alterar ferramentas (arquivos do próprio agente). "
+                    "Posso habilitar isso temporariamente nesta sessão (até fechar o terminal)."
+                )
+                approval_plan = Plan(
+                    intent="session.enable_self_coding",
+                    user_message=user_message,
+                    tool_calls=[],
+                    risk=RiskLevel.CRITICAL,
+                    final_response="Vou habilitar auto-programação por sessão.",
+                )
+                if not require_approval(
+                    approval_plan,
+                    enabled=settings.hitl_enabled,
+                    min_risk=settings.hitl_min_risk,
+                    require_token=settings.hitl_require_token,
+                ):
+                    console.print("Agente> Ok, não vou habilitar auto-programação nesta sessão.")
+                    # Cancela a execução do plano original.
+                    continue
+
+                session_self_coding_granted = True
+                settings = replace(settings, self_coding_enabled=True, custom_tools_enabled=True)
+                # Rebuild registry para que closures em tools vejam as settings atualizadas.
+                registry = build_default_registry(settings=settings, memory_store=memory)
+                console.print("[dim]Auto-programação habilitada nesta sessão.[/dim]")
+
         if settings.router_mode == "llm" and plan.tool_calls:
-            response_text = _execute_plan_react(console, settings, registry, plan, memory)
+            response_text = _execute_plan_react(console, settings, registry, plan, memory, worker_mgr=worker_mgr)
         else:
-            response_text = _execute_plan(console, settings, registry, plan, memory)
+            response_text = _execute_plan(console, settings, registry, plan, memory, worker_mgr=worker_mgr)
         if tts.enabled and getattr(settings, "tts_speak_responses", False) and response_text:
             # Evita falar textos gigantes acidentalmente.
             t = response_text.strip()
@@ -632,7 +750,15 @@ def _run_tool_with_retry(console: Console, settings: Settings, registry, call: T
     return last
 
 
-def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> str | None:
+def _execute_plan(
+    console: Console,
+    settings: Settings,
+    registry,
+    plan: Plan,
+    memory: JsonlMemoryStore,
+    *,
+    worker_mgr: WorkerManager | None = None,
+) -> str | None:
     effective_risk = _effective_risk_for_plan(plan, registry, settings=settings)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
@@ -687,6 +813,35 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         console.print("Agente> Ok, não vou executar isso.")
         return None
 
+    # Se habilitado, manda algumas tools longas para background.
+    long_running_tools = {
+        "edu.pdf_word_autofill",
+        "web.playwright",  # caso exista/venha a existir
+    }
+    if worker_mgr is not None and len(normalized_plan.tool_calls) == 1:
+        call0 = normalized_plan.tool_calls[0]
+        if call0.tool_name in long_running_tools:
+            # Rodamos em background e devolvemos controle ao usuário.
+            def _job_fn():
+                t0 = time.time()
+                res = registry.run(call0.tool_name, call0.args)
+                dt = max(0.0, time.time() - t0)
+                if res.status == "ok":
+                    return "ok", (res.output or "Feito."), None
+                return "error", (res.output or None), (res.error or "erro")
+
+            job_id = worker_mgr.submit(call0.tool_name, _job_fn)
+            text = (
+                f"Iniciei em background (job {job_id}). Você pode continuar conversando. "
+                "Use: jobs | job <id> | cancel <id>."
+            )
+            console.print(f"Agente> {text}")
+            memory.append(
+                "worker_job_started",
+                {"job_id": job_id, "tool": call0.tool_name, "args": call0.args, "intent": normalized_plan.intent},
+            )
+            return text
+
     # Execução sequencial (com retry opcional).
     for call in normalized_plan.tool_calls:
         result = _run_tool_with_retry(console, settings, registry, call, memory)
@@ -714,7 +869,7 @@ def _execute_plan(console: Console, settings: Settings, registry, plan: Plan, me
         return "Feito."
 
 
-def _execute_plan_react(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore) -> str | None:
+def _execute_plan_react(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore, *, worker_mgr: WorkerManager | None = None) -> str | None:
     """Executa tools em loop, replanejando com base em tool outputs (ReAct-ish).
 
     Política:
@@ -729,9 +884,7 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
     # Algumas tools são "single-shot" (fazem o trabalho inteiro em uma chamada).
     # Se elas forem executadas com sucesso num plano determinístico (intent == tool_name),
     # não replanejamos via LLM para evitar respostas genéricas e rate limits.
-    single_shot_tools = {
-        "edu.pdf_word_autofill",
-    }
+    single_shot_tools = {"edu.pdf_word_autofill"}
 
     # Mantém um rastro curto para dar ao LLM.
     trace_messages: list[dict[str, str]] = []

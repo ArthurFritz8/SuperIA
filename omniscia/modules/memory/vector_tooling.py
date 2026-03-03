@@ -63,6 +63,18 @@ def register_vector_memory_tools(
         )
     )
 
+    registry.register(
+        ToolSpec(
+            name="memory.index_paths",
+            description=(
+                "Indexa arquivos do workspace (código/texto; PDF via pypdf opcional) na memória vetorial. "
+                "Args: paths (lista), max_file_mb?"
+            ),
+            risk="LOW",
+            fn=lambda args: _index_paths(args, vm=vm),
+        )
+    )
+
     # Auto-index opcional (best-effort): indexa um pequeno lote recente ao iniciar.
     if settings.vector_memory_auto_index and memory_store is not None:
         try:
@@ -175,3 +187,26 @@ def _remember(args: dict[str, Any], *, vm: ChromaVectorMemory) -> ToolResult:
     item_id = _stable_text_id(text)
     vm.upsert(item_id=item_id, text=text, meta=meta)
     return ToolResult(status="ok", output=f"remembered id={item_id}")
+
+
+def _index_paths(args: dict[str, Any], *, vm: ChromaVectorMemory) -> ToolResult:
+    paths = args.get("paths")
+    if not isinstance(paths, list) or not paths:
+        return ToolResult(status="error", error="informe paths como lista")
+    raw_paths = [str(p) for p in paths if str(p).strip()]
+    if not raw_paths:
+        return ToolResult(status="error", error="paths vazio")
+
+    max_file_mb = int(args.get("max_file_mb", 4) or 4)
+    if max_file_mb < 1:
+        max_file_mb = 1
+    if max_file_mb > 25:
+        max_file_mb = 25
+
+    try:
+        from omniscia.modules.memory.omni_indexer import index_paths_to_vector
+
+        seen, indexed = index_paths_to_vector(vm=vm, paths=raw_paths, source="memory.index_paths")
+        return ToolResult(status="ok", output=f"seen_files={seen} indexed_items={indexed}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))

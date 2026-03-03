@@ -564,6 +564,42 @@ def _route_heuristic(user_message: str) -> Plan:
     # NOTA: geração de código (ex.: exemplos completos de Java) é responsabilidade do modo LLM.
     # No modo heurístico, preferimos não chutar código nem “enfiar” templates fixos.
 
+    # Regra: monitoramento contínuo da tela (rewind) — start/stop/status (sob demanda)
+    wants_monitor = bool(
+        re.search(
+            r"\b(monitorar|monitoramento|monitoramento\s+cont[ií]nuo|rewind)\b",
+            norm,
+        )
+        and re.search(r"\b(tela|screen)\b", norm)
+    )
+    if wants_monitor:
+        if re.search(r"\b(status|estado|como\s+esta|como\s+est[aá])\b", norm):
+            return Plan(
+                intent="vision.rewind_status",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="screen.rewind_status", args={})],
+                risk=RiskLevel.LOW,
+                final_response="Aqui está o status do monitoramento de tela (rewind).",
+            )
+
+        if re.search(r"\b(parar|pare|desligar|desliga|stop|encerrar|encerre)\b", norm):
+            return Plan(
+                intent="vision.stop_rewind",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="screen.rewind_stop", args={})],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou parar o monitoramento contínuo da tela (requer aprovação).",
+            )
+
+        if re.search(r"\b(come[cç]ar|comece|iniciar|inicie|ligar|liga|start|ativar|ative)\b", norm):
+            return Plan(
+                intent="vision.start_rewind",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="screen.rewind_start", args={})],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou iniciar o monitoramento contínuo da tela (requer aprovação).",
+            )
+
     # Regra: screenshot
     is_screenshot = bool(
         re.search(r"\b(screenshot|printscreen|print screen|captura de tela|tire uma captura)\b", norm)

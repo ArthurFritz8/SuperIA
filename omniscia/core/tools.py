@@ -307,6 +307,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
     except Exception:
         logger.info("Windows window tools indisponíveis (erro ao importar/registrar).")
 
+    # Tools UI Automation (Windows UIA) — alternativa ao PyAutoGUI (opt-in por deps)
+    try:
+        from omniscia.modules.os_control.ui_automation_tools import register_ui_automation_tools
+
+        register_ui_automation_tools(registry)
+    except Exception:
+        logger.info("UI Automation tools indisponíveis (uiautomation não instalado ou erro ao importar).")
+
     # Tools de visão (screenshot)
     try:
         from omniscia.modules.vision.screenshot import register_vision_tools
@@ -314,6 +322,15 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         register_vision_tools(registry)
     except Exception:
         logger.info("Vision tools indisponíveis (erro ao importar/registrar).")
+
+    # Rewind multimodal (buffer de screenshots em RAM) — opt-in
+    if settings is not None:
+        try:
+            from omniscia.modules.vision.rewind import register_rewind_tools
+
+            register_rewind_tools(registry, settings)
+        except Exception:
+            logger.info("Rewind tools indisponíveis (erro ao importar/registrar).")
 
     # Tools de OCR
     if settings is not None:

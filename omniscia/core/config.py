@@ -125,6 +125,18 @@ class Settings:
     # ATENÇÃO: isso pode enviar imagens (conteúdo de tela) para a internet conforme o provider.
     vlm_enabled: bool = False
 
+    # Rewind multimodal — opt-in
+    # Mantém um buffer local (RAM) de screenshots recentes para permitir "rewind".
+    # ATENÇÃO: é privacidade local; não envia para a internet, mas captura tela em background.
+    rewind_enabled: bool = False
+    rewind_seconds: int = 60
+    rewind_interval_s: float = 3.0
+
+    # Workers (background jobs) — opt-in
+    # Permite rodar tools longas em thread pool para o agente continuar responsivo.
+    workers_enabled: bool = False
+    workers_max: int = 2
+
     @staticmethod
     def load() -> "Settings":
         """Carrega settings do ambiente.
@@ -258,6 +270,28 @@ class Settings:
         proactive_cpu_threshold = _int_env("OMNI_PROACTIVE_CPU_THRESHOLD", 95)
         proactive_ram_threshold = _int_env("OMNI_PROACTIVE_RAM_THRESHOLD", 95)
         vlm_enabled = _bool_env("OMNI_VLM_ENABLED", False)
+
+        rewind_enabled = _bool_env("OMNI_REWIND_ENABLED", False)
+        rewind_seconds = _int_env("OMNI_REWIND_SECONDS", 60)
+        rewind_interval_s = _float_env("OMNI_REWIND_INTERVAL_S", 3.0)
+
+        # Defaults e clamps conservadores (evita uso agressivo de CPU/RAM).
+        # Recomendação: 30-60s @ 3-4s.
+        if rewind_seconds < 30:
+            rewind_seconds = 30
+        if rewind_seconds > 180:
+            rewind_seconds = 180
+        if rewind_interval_s < 1.0:
+            rewind_interval_s = 1.0
+        if rewind_interval_s > 10.0:
+            rewind_interval_s = 10.0
+
+        workers_enabled = _bool_env("OMNI_WORKERS_ENABLED", False)
+        workers_max = _int_env("OMNI_WORKERS_MAX", 2)
+        if workers_max < 1:
+            workers_max = 1
+        if workers_max > 6:
+            workers_max = 6
         
         # TTS: comportamento de fala (separado do engine)
         tts_speak_responses = _bool_env("OMNI_TTS_SPEAK_RESPONSES", False)
@@ -344,4 +378,11 @@ class Settings:
             proactive_ram_threshold=proactive_ram_threshold,
 
             vlm_enabled=vlm_enabled,
+
+            rewind_enabled=rewind_enabled,
+            rewind_seconds=rewind_seconds,
+            rewind_interval_s=rewind_interval_s,
+
+            workers_enabled=workers_enabled,
+            workers_max=workers_max,
         )

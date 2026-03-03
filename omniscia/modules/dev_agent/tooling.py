@@ -19,6 +19,7 @@ from omniscia.modules.dev_agent.sandbox import parse_command, python_argv, run_c
 from omniscia.modules.dev_agent.autofix import autofix_python_file
 from omniscia.modules.dev_agent.autofix_cmd import autofix_command
 from omniscia.modules.dev_agent.scaffold import scaffold_python_project
+from omniscia.modules.dev_agent.genesis import genesis_create_tool_closed_loop
 
 # Import leve: Settings vem do core e não puxa dependências pesadas.
 from omniscia.core.config import Settings
@@ -82,6 +83,39 @@ def register_dev_tools(registry: ToolRegistry, *, settings: Settings | None = No
             fn=lambda args: _dev_create_tool(args, registry=registry, settings=settings),
         )
     )
+
+    # Gênese (opt-in): ciclo fechado (gerar -> self-test -> autofix -> instalar -> hot-reload)
+    registry.register(
+        ToolSpec(
+            name="dev.genesis",
+            description=(
+                "Cria uma tool custom via ciclo fechado (LLM -> self-test -> auto-fix) e hot-reload. "
+                "Args: name, description, max_iters. Requer OMNI_SELF_CODING_ENABLED=true e OMNI_CUSTOM_TOOLS_ENABLED=true."
+            ),
+            risk="CRITICAL",
+            fn=lambda args: _dev_genesis(args, registry=registry, settings=settings),
+        )
+    )
+
+
+def _dev_genesis(args: dict[str, Any], *, registry: ToolRegistry, settings: Settings | None) -> ToolResult:
+    if settings is None:
+        settings = Settings.load()
+
+    raw_name = str(args.get("name", "") or "").strip()
+    desc = str(args.get("description", "") or "").strip()
+    max_iters = int(args.get("max_iters", 3) or 3)
+
+    ok, msg = genesis_create_tool_closed_loop(
+        registry=registry,
+        settings=settings,
+        name=raw_name,
+        description=desc,
+        max_iters=max_iters,
+    )
+    if ok:
+        return ToolResult(status="ok", output=msg)
+    return ToolResult(status="error", error=msg)
 
 
 def _safe_module_name(name: str) -> str:
