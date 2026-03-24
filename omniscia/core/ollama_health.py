@@ -109,9 +109,13 @@ def maybe_warn_if_ollama_cpu(*, provider: str | None, base_url: str | None, mode
 
     # CPU-only detectado.
     _logger.warning(
-        "Ollama está rodando em CPU (size_vram=0) para '%s' em %s. "
-        "Se você quer GPU no Windows/AMD, inicie o servidor com OLLAMA_VULKAN=1 e reinicie o Ollama. "
-        "Confirme em %s/api/ps se size_vram > 0.",
+        "Ollama está rodando em CPU (size_vram=0) para '%s' em %s.\n"
+        "Para forçar GPU no Windows/AMD (Vulkan):\n"
+        "- Feche o Ollama Desktop (ícone na bandeja) e pare qualquer 'ollama.exe' em execução\n"
+        "- Rode: powershell -ExecutionPolicy Bypass -File scripts/windows/ollama_vulkan_serve.ps1\n"
+        "- (Opcional, pra ficar sempre) rode: powershell -ExecutionPolicy Bypass -File scripts/windows/install_ollama_vulkan_startup.ps1\n"
+        "Valide com: ollama ps  (PROCESSOR deve mostrar GPU)\n"
+        "Ou confirme em %s/api/ps se size_vram > 0.",
         m,
         b,
         b,

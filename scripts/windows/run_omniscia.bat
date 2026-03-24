@@ -13,14 +13,11 @@ if exist "%PY%" (
 
 echo.
 echo Starting Omniscia...
-if /i "%OMNI_STT_MODE%"=="vosk" (
-  echo (Modo voz: fale durante a gravacao; digite 'sair' para encerrar)
-) else if /i "%OMNI_STT_MODE%"=="whisper_openai" (
-  echo (Modo voz: fale durante a gravacao; digite 'sair' para encerrar)
-) else (
-  echo (Modo texto: digite sua mensagem e pressione Enter; digite 'sair' para encerrar)
-  echo (Dica: para voz, use OMNI_STT_MODE=vosk ou rode: %PY% -m omniscia run --stt-mode vosk)
-)
+set "STT=%OMNI_STT_MODE%"
+if "%STT%"=="" set "STT=text"
+echo (Entrada: %STT%  ^(pode cair pra texto se faltar configuracao^))
+echo (Texto: digite sua mensagem e pressione Enter; digite 'sair' para encerrar)
+echo (Voz: use OMNI_STT_MODE=vosk ou whisper_openai; para testar: %PY% -m omniscia.app dictate --seconds 6)
 echo.
 
 if exist "%PY%" (
