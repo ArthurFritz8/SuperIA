@@ -3311,6 +3311,7 @@ def _route_with_llm_messages(
     """
 
     from omniscia.core.litellm_env import provider_requires_api_key
+    from omniscia.core.ollama_health import maybe_warn_if_ollama_cpu
 
     def _has_llm_config_values(provider: str | None, model: str | None, api_key: str | None) -> bool:
         needs_key = provider_requires_api_key(provider)
@@ -3577,6 +3578,11 @@ def _route_with_llm_messages(
             base_kwargs["api_base"] = api_base
 
         resp = completion(model=str(call_settings.llm_model), messages=clean_msgs, temperature=0.0, **base_kwargs)
+        maybe_warn_if_ollama_cpu(
+            provider=getattr(call_settings, "llm_provider", None),
+            base_url=(getattr(call_settings, "llm_base_url", None) or None),
+            model=str(call_settings.llm_model),
+        )
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
 
         # Robustez: alguns modelos devolvem texto extra. Tentamos extrair o primeiro objeto JSON.

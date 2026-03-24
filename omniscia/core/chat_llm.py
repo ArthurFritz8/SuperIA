@@ -17,6 +17,7 @@ from typing import Any
 
 from omniscia.core.config import Settings
 from omniscia.core.litellm_env import apply_litellm_env, provider_requires_api_key
+from omniscia.core.ollama_health import maybe_warn_if_ollama_cpu
 from omniscia.core.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,11 @@ def chat_reply(
                 temperature=float(temperature),
                 **base_kwargs,
             )
+            maybe_warn_if_ollama_cpu(
+                provider=getattr(provider_settings, "llm_provider", None),
+                base_url=(getattr(provider_settings, "llm_base_url", None) or None),
+                model=str(llm_model),
+            )
             content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
             return (content or "").strip()
         except Exception as exc:  # noqa: BLE001
@@ -152,6 +158,11 @@ def chat_reply(
                     messages=msgs2,
                     temperature=float(temperature),
                     **base_kwargs,
+                )
+                maybe_warn_if_ollama_cpu(
+                    provider=getattr(provider_settings, "llm_provider", None),
+                    base_url=(getattr(provider_settings, "llm_base_url", None) or None),
+                    model=str(llm_model),
                 )
                 content2: str = resp2["choices"][0]["message"]["content"]  # type: ignore[index]
                 return (content2 or "").strip()
