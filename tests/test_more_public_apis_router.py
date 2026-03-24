@@ -691,3 +691,59 @@ def test_npm_downloads_last_week_route():
     assert plan.intent == "pkg.npm_downloads_last_week"
     assert plan.tool_calls and plan.tool_calls[0].tool_name == "pkg.npm_downloads_last_week"
     assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_geo_geocode_onde_fica_route():
+    settings = Settings.load()
+    plan = route(settings, "onde fica MASP?")
+    assert plan.intent == "geo.geocode"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "geo.geocode"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_googlebooks_search_route():
+    settings = Settings.load()
+    plan = route(settings, "gbooks: clean code")
+    assert plan.intent == "books.googlebooks_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "books.googlebooks_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_quote_random_route():
+    settings = Settings.load()
+    plan = route(settings, "quote")
+    assert plan.intent == "fun.quote_random"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.quote_random"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_advice_route():
+    settings = Settings.load()
+    plan = route(settings, "conselho")
+    assert plan.intent == "fun.advice"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.advice"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_bored_activity_route():
+    settings = Settings.load()
+    plan = route(settings, "entediado")
+    assert plan.intent == "fun.bored_activity"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.bored_activity"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_fox_image_route():
+    settings = Settings.load()
+    plan = route(settings, "raposa")
+    assert plan.intent == "fun.fox_image"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.fox_image"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_duck_image_route():
+    settings = Settings.load()
+    plan = route(settings, "pato imagem")
+    assert plan.intent == "fun.duck_image"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.duck_image"
+    assert plan.risk == RiskLevel.MEDIUM

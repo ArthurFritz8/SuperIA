@@ -180,6 +180,12 @@ def route(settings: Settings, user_message: str) -> Plan:
         "books.gutendex_search",
         "data.openfoodfacts_search",
         "pkg.npm_downloads_last_week",
+        "books.googlebooks_search",
+        "fun.quote_random",
+        "fun.advice",
+        "fun.bored_activity",
+        "fun.fox_image",
+        "fun.duck_image",
         "win.focus_window",
         "discord.send_message",
         "jgrasp.create_java_program",
@@ -761,6 +767,19 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"title": q, "lang": "pt"})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou buscar um resumo na Wikipedia.",
+        )
+
+    # Regra: geocode (onde fica...) — natural
+    # Exemplos: "onde fica MASP?", "onde fica avenida paulista"
+    m = re.match(r"^\s*onde\s+fica\s+(.+?)\s*[\?\!\.]?\s*$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip("\"'")
+        return Plan(
+            intent="geo.geocode",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="geo.geocode", args={"query": q, "lang": "pt"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou localizar no mapa (OpenStreetMap).",
         )
 
     # Regra: geocode (coordenadas) — explícito
@@ -1374,6 +1393,52 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok — vou sacar cartas (Deck of Cards API).",
         )
 
+    # Regras: fun (quotes / advice / bored / imagens)
+    if re.fullmatch(r"(quote|citacao|frase)(?:\s+(aleatoria|random))?", norm or ""):
+        return Plan(
+            intent="fun.quote_random",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.quote_random", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma quote aleatória.",
+        )
+
+    if re.fullmatch(r"(conselho|advice)", norm or ""):
+        return Plan(
+            intent="fun.advice",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.advice", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar um conselho aleatório.",
+        )
+
+    if re.fullmatch(r"(entediado|bored)", norm or ""):
+        return Plan(
+            intent="fun.bored_activity",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.bored_activity", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou sugerir uma atividade aleatória.",
+        )
+
+    if re.fullmatch(r"(raposa|fox)(?:\s+(imagem|image))?", norm or ""):
+        return Plan(
+            intent="fun.fox_image",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.fox_image", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma imagem aleatória de raposa.",
+        )
+
+    if re.fullmatch(r"(pato|duck)(?:\s+(imagem|image))?", norm or ""):
+        return Plan(
+            intent="fun.duck_image",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.duck_image", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma imagem aleatória de pato.",
+        )
+
     # Regra: xkcd — explícito
     m = re.search(r"\bxkcd\b\s*[:\-]\s*(\d{1,6})\b", msg, flags=re.IGNORECASE)
     if m:
@@ -1404,6 +1469,18 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="music.itunes_search", args={"query": q, "media": "music", "limit": 5})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou buscar no iTunes.",
+        )
+
+    # Regra: Google Books — explícito
+    m = re.search(r"\b(gbooks|googlebooks|google\s*books)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="books.googlebooks_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="books.googlebooks_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar livros no Google Books.",
         )
 
     # Regra: Gutendex / Gutenberg — explícito

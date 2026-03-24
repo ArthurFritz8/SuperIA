@@ -112,6 +112,14 @@ Mais APIs variadas (sem chave) — lote 3:
 - books.gutendex_search (Project Gutenberg via Gutendex)
 - data.openfoodfacts_search (OpenFoodFacts — busca produtos)
 - pkg.npm_downloads_last_week (npm downloads — last-week)
+
+Mais APIs variadas (sem chave) — lote 4:
+- books.googlebooks_search (Google Books — busca livros)
+- fun.quote_random (Quotable — quote aleatória)
+- fun.advice (Advice Slip — conselho aleatório)
+- fun.bored_activity (Bored API — sugestão aleatória)
+- fun.fox_image (RandomFox — imagem aleatória)
+- fun.duck_image (RandomDuck — imagem aleatória)
 """
 
 from __future__ import annotations
@@ -283,6 +291,18 @@ _ALLOWED_HOSTS = {
     "world.openfoodfacts.org",
     # npm downloads API
     "api.npmjs.org",
+    # Google Books
+    "www.googleapis.com",
+    # Quotable
+    "api.quotable.io",
+    # Advice Slip
+    "api.adviceslip.com",
+    # Bored API
+    "www.boredapi.com",
+    # RandomFox
+    "randomfox.ca",
+    # RandomDuck
+    "random-d.uk",
 }
 
 
@@ -1083,6 +1103,60 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Downloads last-week de um pacote npm. Args: package",
             risk="MEDIUM",
             fn=_npm_downloads_last_week,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="books.googlebooks_search",
+            description="Busca livros no Google Books (sem chave). Args: query, limit? (default 5)",
+            risk="MEDIUM",
+            fn=_googlebooks_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.quote_random",
+            description="Quote aleatória (Quotable). Args: (none)",
+            risk="MEDIUM",
+            fn=_quote_random,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.advice",
+            description="Conselho aleatório (Advice Slip). Args: (none)",
+            risk="MEDIUM",
+            fn=_advice_random,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.bored_activity",
+            description="Sugestão aleatória de atividade (Bored API). Args: (none)",
+            risk="MEDIUM",
+            fn=_bored_activity,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.fox_image",
+            description="Imagem aleatória de raposa (RandomFox). Args: (none)",
+            risk="MEDIUM",
+            fn=_fox_image,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.duck_image",
+            description="Imagem aleatória de pato (RandomDuck). Args: (none)",
+            risk="MEDIUM",
+            fn=_duck_image,
         )
     )
 
@@ -4362,4 +4436,129 @@ def _npm_downloads_last_week(args: dict[str, Any]) -> ToolResult:
         "end": data.get("end"),
         "source": "api.npmjs.org",
     }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _googlebooks_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    params: dict[str, Any] = {
+        "q": query,
+        "maxResults": limit,
+        "printType": "books",
+    }
+    data, err = _http_json(method="GET", url="https://www.googleapis.com/books/v1/volumes", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    items = data.get("items") if isinstance(data.get("items"), list) else []
+    slim: list[dict[str, Any]] = []
+    for it in items[:limit]:
+        if not isinstance(it, dict):
+            continue
+        vi = it.get("volumeInfo") if isinstance(it.get("volumeInfo"), dict) else {}
+        links = vi.get("imageLinks") if isinstance(vi.get("imageLinks"), dict) else {}
+        slim.append(
+            {
+                "id": it.get("id"),
+                "title": vi.get("title"),
+                "authors": (vi.get("authors")[:5] if isinstance(vi.get("authors"), list) else []),
+                "publishedDate": vi.get("publishedDate"),
+                "categories": (vi.get("categories")[:5] if isinstance(vi.get("categories"), list) else []),
+                "pageCount": vi.get("pageCount"),
+                "language": vi.get("language"),
+                "infoLink": vi.get("infoLink"),
+                "previewLink": vi.get("previewLink"),
+                "thumbnail": links.get("thumbnail"),
+            }
+        )
+
+    out = {"query": query, "count": len(slim), "results": slim, "source": "www.googleapis.com"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _quote_random(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://api.quotable.io/random", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {
+        "content": data.get("content"),
+        "author": data.get("author"),
+        "tags": (data.get("tags")[:10] if isinstance(data.get("tags"), list) else []),
+        "source": "api.quotable.io",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _advice_random(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://api.adviceslip.com/advice", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    slip = data.get("slip") if isinstance(data.get("slip"), dict) else {}
+    out = {
+        "id": slip.get("id"),
+        "advice": slip.get("advice"),
+        "source": "api.adviceslip.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _bored_activity(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://www.boredapi.com/api/activity", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {
+        "activity": data.get("activity"),
+        "type": data.get("type"),
+        "participants": data.get("participants"),
+        "price": data.get("price"),
+        "link": data.get("link"),
+        "key": data.get("key"),
+        "accessibility": data.get("accessibility"),
+        "source": "www.boredapi.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _fox_image(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://randomfox.ca/floof/", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {"image": data.get("image"), "link": data.get("link"), "source": "randomfox.ca"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _duck_image(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://random-d.uk/api/v2/random", params={"type": "json"}, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {"message": data.get("message"), "image": data.get("url"), "source": "random-d.uk"}
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
