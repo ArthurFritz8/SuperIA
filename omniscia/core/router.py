@@ -844,9 +844,9 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
     ):
         title_contains = None
         # Se o usuário fornecer um título de janela entre aspas, usamos como hint.
-        q = re.search(r"['\"]([^'\"]{2,80})['\"]", msg)
-        if q:
-            title_contains = (q.group(1) or "").strip()
+        m_quote = re.search(r"['\"]([^'\"]{2,80})['\"]", msg)
+        if m_quote:
+            title_contains = (m_quote.group(1) or "").strip()
 
         args: dict[str, Any] = {"duration_s": 30.0, "settle_ms": 450}
         if title_contains:
@@ -876,8 +876,8 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             )
 
         # Tenta inferir um nome de perfil simples.
-        q = re.search(r"['\"]([^'\"]{2,60})['\"]", msg)
-        profile = (q.group(1).strip().lower() if q else "")
+        m_quote = re.search(r"['\"]([^'\"]{2,60})['\"]", msg)
+        profile = (m_quote.group(1).strip().lower() if m_quote else "")
 
         # Se o usuário não forneceu um profile, fazemos calibração runner rápida via mouse.
         if not profile and re.search(r"\b(qualquer|qualquer\s+jogo)\b", norm):
@@ -3095,9 +3095,9 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
         # - revogar permissões contendo vscode.
         # - revogar permissão "vscode.install_extension:id=foo.bar"
         contains = ""
-        q = re.search(r"['\"]([^'\"]{2,180})['\"]", msg)
-        if q:
-            contains = (q.group(1) or "").strip()
+        m_quote = re.search(r"['\"]([^'\"]{2,180})['\"]", msg)
+        if m_quote:
+            contains = (m_quote.group(1) or "").strip()
         else:
             m = re.search(r"\bcontendo\b\s+(.+)$", norm)
             if m:

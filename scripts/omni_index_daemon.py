@@ -79,7 +79,7 @@ def main() -> int:
             if getattr(event, "is_directory", False):
                 return
             try:
-                _index_one(Path(event.src_path))
+                _index_one(Path(os.fsdecode(event.src_path)))
             except Exception:
                 return
 
@@ -87,7 +87,7 @@ def main() -> int:
             if getattr(event, "is_directory", False):
                 return
             try:
-                _index_one(Path(event.src_path))
+                _index_one(Path(os.fsdecode(event.src_path)))
             except Exception:
                 return
 
