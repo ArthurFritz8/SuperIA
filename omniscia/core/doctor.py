@@ -17,6 +17,7 @@ import sys
 from dataclasses import dataclass
 
 from omniscia.core.config import Settings
+from omniscia.core.litellm_env import provider_requires_api_key
 
 
 @dataclass(frozen=True)
@@ -237,7 +238,10 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
     # LLM sanity: common source of "error toda hora" when router_mode=llm.
     if str(settings.router_mode).lower() == "llm":
         provider_ok = bool(getattr(settings, "llm_provider", None))
-        api_key_ok = bool(getattr(settings, "llm_api_key", None))
+        provider = str(getattr(settings, "llm_provider", "") or "").strip()
+        needs_api_key = provider_requires_api_key(provider)
+        api_key = str(getattr(settings, "llm_api_key", "") or "").strip()
+        api_key_ok = (not needs_api_key) or bool(api_key)
         model_ok = bool(getattr(settings, "llm_model", None))
 
         checks.append(
@@ -252,8 +256,10 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
             Check(
                 name="LLM api key",
                 ok=api_key_ok,
-                detail="set" if api_key_ok else "(vazio)",
-                fix="Configure OMNI_LLM_API_KEY no .env ou troque OMNI_ROUTER_MODE=heuristic",
+                detail="set" if (needs_api_key and api_key_ok) else ("(vazio)" if needs_api_key else "(nao necessario)"),
+                fix=None
+                if (not needs_api_key)
+                else "Configure OMNI_LLM_API_KEY no .env ou troque OMNI_ROUTER_MODE=heuristic",
             )
         )
         checks.append(
