@@ -33,6 +33,17 @@ class Settings:
     llm_model: str | None = None
     llm_api_key: str | None = None
 
+    # LLM: base URL opcional (útil para OpenAI-compat e Ollama)
+    # Ex (Ollama): http://localhost:11434
+    llm_base_url: str | None = None
+
+    # LLM fallback (opcional): usado quando o LLM principal falhar.
+    # Ex: provider=ollama, model=ollama/llama3.1
+    llm_fallback_provider: str | None = None
+    llm_fallback_model: str | None = None
+    llm_fallback_api_key: str | None = None
+    llm_fallback_base_url: str | None = None
+
     # I/O
     stt_mode: SttMode = "text"
     tts_mode: TtsMode = "none"
@@ -76,6 +87,24 @@ class Settings:
     hitl_enabled: bool = True
     hitl_min_risk: RiskLevel = RiskLevel.HIGH
     hitl_require_token: bool = False
+    # Se true, ao aprovar uma ação (HITL) a aprovação pode ser persistida para não pedir de novo.
+    # Guardrails adicionais em runtime impedem persistir CRITICAL ou ferramentas perigosas.
+    hitl_remember_approvals: bool = True
+    hitl_approvals_path: str = "data/hitl_approvals.json"
+
+    # Policies (guardrails offline além do HITL)
+    policy_enabled: bool = True
+    policy_path: str = "data/policy.json"
+
+    # Snapshots (rollback seguro)
+    snapshots_enabled: bool = True
+    snapshots_dir: str = "data/snapshots"
+    snapshots_auto_before_high_risk: bool = True
+
+    # Run logs + replay (observabilidade)
+    runlog_enabled: bool = True
+    runlog_dir: str = "data/runs"
+    replay_enabled: bool = True
 
     # Web (Playwright)
     web_headless: bool = True
@@ -101,6 +130,21 @@ class Settings:
     retry_backoff_s: float = 0.35
     retry_side_effect_tools: bool = False
 
+    # Meta-raciocínio (opt-in)
+    # Quando true e router_mode==llm, roda um "critic" (LLM) para revisar o plano antes de executar.
+    # Ajuda a reduzir planos inválidos/ineficientes e melhora coerência (custo: +1 chamada LLM por comando).
+    plan_critic_enabled: bool = False
+
+    # Autonomia (opt-in)
+    # Quando true, o loop ReAct pode executar mais passos antes de parar.
+    autonomy_enabled: bool = False
+    autonomy_max_steps: int = 12
+    autonomy_checkpoint_every: int = 4
+
+    # Perfil do usuário (memória de longo prazo) — opt-in para atualização automática.
+    # As tools de perfil podem existir mesmo com auto-update desligado.
+    profile_auto_update: bool = False
+
     # Extensibilidade / Jarvis definitivo (opt-in)
     # Tools custom carregadas dinamicamente de omniscia/tools/custom
     custom_tools_enabled: bool = False
@@ -112,6 +156,12 @@ class Settings:
     vector_memory_auto_index: bool = False
     # Aprendizagem contínua (opt-in): após respostas longas/complexas, o agente pode sintetizar e salvar memórias.
     vector_memory_auto_remember: bool = False
+
+    # Memória vetorial — parâmetros (quando habilitada)
+    # Defaults alinhados com o comportamento atual.
+    vector_memory_persist_dir: str = "data/chroma"
+    vector_memory_collection: str = "omniscia_memory"
+    vector_memory_embed_model: str = "all-MiniLM-L6-v2"
     # Hotkey global (Ctrl+Space) para capturar contexto de tela (screenshot + OCR)
     hotkey_screen_enabled: bool = False
     # Proatividade (scheduler): o agente pode alertar sobre CPU/RAM/processos
@@ -157,6 +207,27 @@ class Settings:
             os.getenv("OMNI_HITL_REQUIRE_TOKEN", "false").strip().lower() == "true"
         )
 
+        hitl_remember_approvals = (
+            os.getenv("OMNI_HITL_REMEMBER_APPROVALS", "true").strip().lower() != "false"
+        )
+        hitl_approvals_path = (
+            os.getenv("OMNI_HITL_APPROVALS_PATH", "data/hitl_approvals.json").strip()
+            or "data/hitl_approvals.json"
+        )
+
+        policy_enabled = (os.getenv("OMNI_POLICY_ENABLED", "true").strip().lower() != "false")
+        policy_path = (os.getenv("OMNI_POLICY_PATH", "data/policy.json").strip() or "data/policy.json")
+
+        snapshots_enabled = (os.getenv("OMNI_SNAPSHOTS_ENABLED", "true").strip().lower() != "false")
+        snapshots_dir = (os.getenv("OMNI_SNAPSHOTS_DIR", "data/snapshots").strip() or "data/snapshots")
+        snapshots_auto_before_high_risk = (
+            os.getenv("OMNI_SNAPSHOTS_AUTO_BEFORE_HIGH_RISK", "true").strip().lower() != "false"
+        )
+
+        runlog_enabled = (os.getenv("OMNI_RUNLOG_ENABLED", "true").strip().lower() != "false")
+        runlog_dir = (os.getenv("OMNI_RUNLOG_DIR", "data/runs").strip() or "data/runs")
+        replay_enabled = (os.getenv("OMNI_REPLAY_ENABLED", "true").strip().lower() != "false")
+
         hitl_min_risk_env = os.getenv("OMNI_HITL_MIN_RISK")
         if hitl_min_risk_env is None or not hitl_min_risk_env.strip():
             # Default seguro: exigir aprovação a partir de HIGH.
@@ -181,6 +252,13 @@ class Settings:
         llm_provider = os.getenv("OMNI_LLM_PROVIDER") or None
         llm_model = os.getenv("OMNI_LLM_MODEL") or None
         llm_api_key = os.getenv("OMNI_LLM_API_KEY") or None
+
+        llm_base_url = (os.getenv("OMNI_LLM_BASE_URL") or "").strip() or None
+
+        llm_fallback_provider = (os.getenv("OMNI_LLM_FALLBACK_PROVIDER") or "").strip() or None
+        llm_fallback_model = (os.getenv("OMNI_LLM_FALLBACK_MODEL") or "").strip() or None
+        llm_fallback_api_key = (os.getenv("OMNI_LLM_FALLBACK_API_KEY") or "").strip() or None
+        llm_fallback_base_url = (os.getenv("OMNI_LLM_FALLBACK_BASE_URL") or "").strip() or None
 
         stt_openai_api_key = os.getenv("OMNI_STT_OPENAI_API_KEY") or None
         stt_openai_model = os.getenv("OMNI_STT_OPENAI_MODEL", "whisper-1").strip() or "whisper-1"
@@ -259,11 +337,23 @@ class Settings:
             os.getenv("OMNI_RETRY_SIDE_EFFECTS", "false").strip().lower() == "true"
         )
 
+        plan_critic_enabled = _bool_env("OMNI_PLAN_CRITIC_ENABLED", False)
+
+        autonomy_enabled = _bool_env("OMNI_AUTONOMY_ENABLED", False)
+        autonomy_max_steps = _int_env("OMNI_AUTONOMY_MAX_STEPS", 12)
+        autonomy_checkpoint_every = _int_env("OMNI_AUTONOMY_CHECKPOINT_EVERY", 4)
+
+        profile_auto_update = _bool_env("OMNI_PROFILE_AUTO_UPDATE", False)
+
         custom_tools_enabled = _bool_env("OMNI_CUSTOM_TOOLS_ENABLED", False)
         self_coding_enabled = _bool_env("OMNI_SELF_CODING_ENABLED", False)
         vector_memory_enabled = _bool_env("OMNI_VECTOR_MEMORY_ENABLED", False)
         vector_memory_auto_index = _bool_env("OMNI_VECTOR_MEMORY_AUTO_INDEX", False)
         vector_memory_auto_remember = _bool_env("OMNI_VECTOR_MEMORY_AUTO_REMEMBER", False)
+
+        vector_memory_persist_dir = (os.getenv("OMNI_VECTOR_MEMORY_PERSIST_DIR") or "").strip() or "data/chroma"
+        vector_memory_collection = (os.getenv("OMNI_VECTOR_MEMORY_COLLECTION") or "").strip() or "omniscia_memory"
+        vector_memory_embed_model = (os.getenv("OMNI_VECTOR_MEMORY_EMBED_MODEL") or "").strip() or "all-MiniLM-L6-v2"
         hotkey_screen_enabled = _bool_env("OMNI_HOTKEY_SCREEN_ENABLED", False)
         proactive_enabled = _bool_env("OMNI_PROACTIVE_ENABLED", False)
         proactive_interval_s = _int_env("OMNI_PROACTIVE_INTERVAL_S", 300)
@@ -321,6 +411,15 @@ class Settings:
         if retry_backoff_s > 5.0:
             retry_backoff_s = 5.0
 
+        if autonomy_max_steps < 6:
+            autonomy_max_steps = 6
+        if autonomy_max_steps > 40:
+            autonomy_max_steps = 40
+        if autonomy_checkpoint_every < 1:
+            autonomy_checkpoint_every = 1
+        if autonomy_checkpoint_every > 20:
+            autonomy_checkpoint_every = 20
+
         # Normalização mínima: evita valores inválidos explodirem silenciosamente.
         if router_mode not in ("heuristic", "llm"):
             router_mode = "heuristic"
@@ -334,6 +433,11 @@ class Settings:
             llm_provider=llm_provider,
             llm_model=llm_model,
             llm_api_key=llm_api_key,
+            llm_base_url=llm_base_url,
+            llm_fallback_provider=llm_fallback_provider,
+            llm_fallback_model=llm_fallback_model,
+            llm_fallback_api_key=llm_fallback_api_key,
+            llm_fallback_base_url=llm_fallback_base_url,
             stt_mode=stt_mode,  # type: ignore[arg-type]
             tts_mode=tts_mode,  # type: ignore[arg-type]
             tts_speak_responses=tts_speak_responses,
@@ -355,6 +459,16 @@ class Settings:
             hitl_enabled=hitl_enabled,
             hitl_min_risk=hitl_min_risk,
             hitl_require_token=hitl_require_token,
+            hitl_remember_approvals=hitl_remember_approvals,
+            hitl_approvals_path=hitl_approvals_path,
+            policy_enabled=policy_enabled,
+            policy_path=policy_path,
+            snapshots_enabled=snapshots_enabled,
+            snapshots_dir=snapshots_dir,
+            snapshots_auto_before_high_risk=snapshots_auto_before_high_risk,
+            runlog_enabled=runlog_enabled,
+            runlog_dir=runlog_dir,
+            replay_enabled=replay_enabled,
             web_headless=web_headless,
             web_assume_https=web_assume_https,
             tesseract_cmd=tesseract_cmd,
@@ -366,11 +480,22 @@ class Settings:
             retry_backoff_s=retry_backoff_s,
             retry_side_effect_tools=retry_side_effect_tools,
 
+            plan_critic_enabled=plan_critic_enabled,
+
+            autonomy_enabled=autonomy_enabled,
+            autonomy_max_steps=autonomy_max_steps,
+            autonomy_checkpoint_every=autonomy_checkpoint_every,
+
+            profile_auto_update=profile_auto_update,
+
             custom_tools_enabled=custom_tools_enabled,
             self_coding_enabled=self_coding_enabled,
             vector_memory_enabled=vector_memory_enabled,
             vector_memory_auto_index=vector_memory_auto_index,
             vector_memory_auto_remember=vector_memory_auto_remember,
+            vector_memory_persist_dir=vector_memory_persist_dir,
+            vector_memory_collection=vector_memory_collection,
+            vector_memory_embed_model=vector_memory_embed_model,
             hotkey_screen_enabled=hotkey_screen_enabled,
             proactive_enabled=proactive_enabled,
             proactive_interval_s=proactive_interval_s,

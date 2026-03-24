@@ -33,6 +33,8 @@ _DETERMINISTIC_INTENTS: set[str] = {
     "os.close_app",
     "os.scan_apps",
     "os.generate_open_apps",
+    "os.list_processes",
+    "os.list_installed_apps",
     "os.mkdir",
     # Filesystem routines
     "fs.list_dir",
@@ -64,6 +66,7 @@ _DETERMINISTIC_INTENTS: set[str] = {
     "edu.pdf_word_autofill",
     # Web read-only
     "web.get_page_text",
+    "web.research",
     # Public API integrations (read-only)
     "data.weather",
     "finance.crypto_price",
@@ -170,6 +173,8 @@ _DETERMINISTIC_INTENTS: set[str] = {
     "br.ibge_municipalities_by_uf",
     "br.viacep_lookup",
     "win.focus_window",
+    "win.list_windows",
+    "win.foreground_window",
     "discord.send_message",
     "jgrasp.create_java_program",
     "jgrasp.write_code",
@@ -184,7 +189,39 @@ _DETERMINISTIC_INTENTS: set[str] = {
     "core.omega_off",
     "core.voice_on",
     "core.voice_off",
+    "core.autonomy_on",
+    "core.autonomy_off",
+    "core.doctor",
+    "core.approvals_list",
+    "core.approvals_revoke",
+    "core.approvals_reset",
+    "core.policy_show",
+    "core.policy_write",
+    "core.snapshot_create",
+    "core.snapshot_list",
+    "core.snapshot_restore",
+    "core.memory_compact",
+    # Perfil persistente (memória de longo prazo)
+    "memory.profile_get",
+    "memory.profile_update",
+    "memory.profile_reset",
     "core.help",
+
+    # VS Code (CLI + .vscode/*)
+    "vscode.open",
+    "vscode.open_file",
+    "vscode.list_extensions",
+    "vscode.install_extension",
+    "vscode.uninstall_extension",
+    "vscode.settings_read",
+    "vscode.settings_get",
+    "vscode.settings_update",
+    "vscode.extensions_read",
+    "vscode.extensions_update",
+    "vscode.tasks_read",
+    "vscode.tasks_update",
+    "vscode.launch_read",
+    "vscode.launch_update",
 }
 
 
@@ -227,7 +264,13 @@ def route(settings: Settings, user_message: str) -> Plan:
     return heuristic
 
 
-def route_with_registry(settings: Settings, user_message: str, *, registry: ToolRegistry) -> Plan:
+def route_with_registry(
+    settings: Settings,
+    user_message: str,
+    *,
+    registry: ToolRegistry,
+    context_messages: list[dict[str, str]] | None = None,
+) -> Plan:
     """Como `route()`, mas com conhecimento das tools registradas.
 
     Benefícios:
@@ -273,7 +316,13 @@ def route_with_registry(settings: Settings, user_message: str, *, registry: Tool
         return heuristic
 
     if settings.router_mode == "llm":
-        plan = route_llm(settings, user_message, heuristic_fallback=heuristic, registry=registry)
+        plan = route_llm(
+            settings,
+            user_message,
+            heuristic_fallback=heuristic,
+            registry=registry,
+            context_messages=context_messages,
+        )
         if plan is not None:
             return plan
 
@@ -466,6 +515,79 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[],
             risk=RiskLevel.LOW,
             final_response="Ok — voz ativada para respostas (se disponível).",
+        )
+
+    # Regra: modo autonomia (sessão)
+    if re.search(r"\b(autonomia|autonomo|autopilot|piloto\s+automatico)\b", norm) and re.search(
+        r"\b(ativar|ativa|liga|ligar|on|habilitar)\b",
+        norm,
+    ):
+        return Plan(
+            intent="core.autonomy_on",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — autonomia ativada nesta sessão (tarefas mais longas).",
+        )
+
+    if re.search(r"\b(autonomia|autonomo|autopilot|piloto\s+automatico)\b", norm) and re.search(
+        r"\b(desativar|desativa|desliga|desligar|off)\b",
+        norm,
+    ):
+        return Plan(
+            intent="core.autonomy_off",
+            user_message=msg,
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Ok — autonomia desativada nesta sessão.",
+        )
+
+    # Regra: perfil persistente (preferências explícitas)
+    if re.search(r"\b(meu\s+nome\s+e|meu\s+nome\s+é|pode\s+me\s+chamar\s+de|me\s+chame\s+de)\b", norm):
+        nm = _guess_name_from_text(msg)
+        if nm:
+            return Plan(
+                intent="memory.profile_update",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"name": nm}})],
+                risk=RiskLevel.LOW,
+                final_response=f"Ok — vou te chamar de {nm}.",
+            )
+
+    if re.search(r"\b(responda\s+em|fale\s+em)\s+(ingles|english)\b", norm):
+        return Plan(
+            intent="memory.profile_update",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"language": "en"}})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou responder em inglês.",
+        )
+
+    if re.search(r"\b(responda\s+em|fale\s+em)\s+(portugues|português|pt\-br|brasil)\b", norm):
+        return Plan(
+            intent="memory.profile_update",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"language": "pt-BR"}})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou responder em PT-BR.",
+        )
+
+    if re.search(r"\b(respostas\s+curtas|seja\s+curto|mais\s+curto|curtinho|objetivo)\b", norm):
+        return Plan(
+            intent="memory.profile_update",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"verbosity": "short"}})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou ser mais curto e objetivo.",
+        )
+
+    if re.search(r"\b(mais\s+detalhado|bem\s+detalhado|detalhe|com\s+detalhes|explica\s+melhor)\b", norm):
+        return Plan(
+            intent="memory.profile_update",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"verbosity": "detailed"}})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou responder com mais detalhes.",
         )
 
     def _guess_output_filename_for_ext(text: str, ext: str) -> str | None:
@@ -2188,10 +2310,35 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok. Vou gerar um arquivo JSON com apps detectados para sua allowlist.",
         )
 
+    # Regra: mapear programas abertos (janelas + processos)
+    if re.search(r"\b(apps?|programas?)\b", norm) and re.search(
+        r"\b(abertos?|aberta|rodando|em execucao|executando|em uso|ativos?)\b", norm
+    ) and re.search(r"\b(listar|lista|mostrar|ver|mapear|mapa)\b", norm):
+        return Plan(
+            intent="win.list_windows",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(tool_name="win.list_windows", args={"visible_only": True, "max_results": 200}),
+                ToolCall(tool_name="os.list_processes", args={"max_results": 300}),
+            ],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou mapear as janelas abertas e os processos em execução.",
+        )
+
     # Regra: listar apps instalados/atalhos
     if re.search(r"\b(listar|lista|mostrar|ver)\b.*\b(apps|programas)\b", norm) and re.search(
         r"\b(instalados|atalhos|menu iniciar|menu|start)\b", norm
     ):
+        # Se o usuário pediu explicitamente "instalados", preferimos o inventário via Registro.
+        if re.search(r"\binstalados\b", norm) and not re.search(r"\b(atalhos|menu iniciar|start)\b", norm):
+            return Plan(
+                intent="os.list_installed_apps",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="os.list_installed_apps", args={"max_results": 800})],
+                risk=RiskLevel.LOW,
+                final_response="Ok — vou listar apps instalados (via Registro do Windows).",
+            )
+
         return Plan(
             intent="os.scan_apps",
             user_message=msg,
@@ -2220,6 +2367,91 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "calculator"})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok, abri a Calculadora do Windows.",
+        )
+
+    # Regra: abrir VS Code
+    if re.search(r"\b(vs\s*code|vscode|visual\s+studio\s+code)\b", norm) and re.search(
+        r"\b(abrir|abra|abre|open)\b", norm
+    ):
+        return Plan(
+            intent="os.open_app",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "vscode"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok, vou abrir o VS Code.",
+        )
+
+    # VS Code: listar extensões
+    if re.search(r"\b(vs\s*code|vscode|visual\s+studio\s+code)\b", norm) and re.search(
+        r"\b(extens(ao|oes)|extensions?)\b", norm
+    ) and re.search(r"\b(listar|liste|mostrar|mostre|ver|veja)\b", norm):
+        return Plan(
+            intent="vscode.list_extensions",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="vscode.list_extensions", args={"show_versions": True})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou listar as extensões instaladas no VS Code.",
+        )
+
+    # VS Code: instalar/remover extensão por id (publisher.name)
+    if re.search(r"\b(extens(ao|oes)|extensions?)\b", norm) and re.search(r"\b(instalar|instale|instala|adicionar|adicione|adiciona)\b", norm):
+        m = re.search(r"([A-Za-z0-9][A-Za-z0-9\-]*\.[A-Za-z0-9][A-Za-z0-9\-\.]*)", msg)
+        if m:
+            ext_id = (m.group(1) or "").strip()
+            return Plan(
+                intent="vscode.install_extension",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="vscode.install_extension", args={"extension_id": ext_id})],
+                risk=RiskLevel.HIGH,
+                final_response=f"Ok — vou instalar a extensão {ext_id} no VS Code.",
+            )
+
+    if re.search(r"\b(extens(ao|oes)|extensions?)\b", norm) and re.search(r"\b(remover|remove|desinstalar|desinstale|uninstall)\b", norm):
+        m = re.search(r"([A-Za-z0-9][A-Za-z0-9\-]*\.[A-Za-z0-9][A-Za-z0-9\-\.]*)", msg)
+        if m:
+            ext_id = (m.group(1) or "").strip()
+            return Plan(
+                intent="vscode.uninstall_extension",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="vscode.uninstall_extension", args={"extension_id": ext_id})],
+                risk=RiskLevel.HIGH,
+                final_response=f"Ok — vou remover a extensão {ext_id} do VS Code.",
+            )
+
+    # VS Code: ler settings.json do workspace
+    if re.search(r"\b(vs\s*code|vscode|visual\s+studio\s+code)\b", norm) and re.search(
+        r"\b(settings\.json|settings|configurac(ao|oes)|config)\b", norm
+    ) and re.search(r"\b(ler|leia|mostrar|mostre|ver|veja)\b", norm):
+        return Plan(
+            intent="vscode.settings_read",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="vscode.settings_read", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou ler o .vscode/settings.json deste workspace.",
+        )
+
+    # VS Code: ler tasks.json do workspace
+    if re.search(r"\b(vs\s*code|vscode|visual\s+studio\s+code)\b", norm) and re.search(
+        r"\b(tasks\.json|tasks|tarefas)\b", norm
+    ) and re.search(r"\b(ler|leia|mostrar|mostre|ver|veja)\b", norm):
+        return Plan(
+            intent="vscode.tasks_read",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="vscode.tasks_read", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou ler o .vscode/tasks.json deste workspace.",
+        )
+
+    # VS Code: ler launch.json do workspace
+    if re.search(r"\b(vs\s*code|vscode|visual\s+studio\s+code)\b", norm) and re.search(
+        r"\b(launch\.json|launch|debug|depurar|depurac(ao|oes))\b", norm
+    ) and re.search(r"\b(ler|leia|mostrar|mostre|ver|veja)\b", norm):
+        return Plan(
+            intent="vscode.launch_read",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="vscode.launch_read", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou ler o .vscode/launch.json deste workspace.",
         )
 
     # Regra: abrir Discord
@@ -2680,6 +2912,153 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Aqui estão as configurações efetivas.",
         )
 
+    # Regra: diagnóstico (doctor)
+    if norm in {"doctor", "diagnostico", "diagnostico do ambiente", "diagnostico ambiente", "diagnostico do sistema"} or bool(
+        re.search(r"\b(doctor|diagnostico|diagnostico\s+do\s+ambiente|diagnostico\s+ambiente)\b", norm)
+    ):
+        return Plan(
+            intent="core.doctor",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.doctor", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou rodar o diagnóstico do ambiente.",
+        )
+
+    # Regra: listar aprovações lembradas (HITL)
+    if bool(
+        re.search(
+            r"\b(listar|lista|ver|mostrar|exibir)\b.*\b(permissoes|permissoes\s+lembradas|permissao|aprovacoes|aprovacoes\s+lembradas|hitl)\b",
+            norm,
+        )
+    ):
+        return Plan(
+            intent="core.approvals_list",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.approvals_list", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — aqui está a lista de permissões lembradas.",
+        )
+
+    # Regra: resetar/limpar aprovações lembradas (HITL)
+    if bool(
+        re.search(
+            r"\b(resetar|reset|limpar|apagar|zerar)\b.*\b(permissoes|permissoes\s+lembradas|aprovacoes|aprovacoes\s+lembradas|hitl)\b",
+            norm,
+        )
+    ):
+        return Plan(
+            intent="core.approvals_reset",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.approvals_reset", args={})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou resetar as permissões lembradas (requer aprovação).",
+        )
+
+    # Regra: revogar aprovações específicas (HITL)
+    if bool(re.search(r"\b(revogar|revoga|remover|remove)\b.*\b(permissoes|permissoes\s+lembradas|aprovacoes|aprovacoes\s+lembradas|hitl)\b", norm)):
+        # Aceita formatos:
+        # - revogar permissões contendo vscode.
+        # - revogar permissão "vscode.install_extension:id=foo.bar"
+        contains = ""
+        q = re.search(r"['\"]([^'\"]{2,180})['\"]", msg)
+        if q:
+            contains = (q.group(1) or "").strip()
+        else:
+            m = re.search(r"\bcontendo\b\s+(.+)$", norm)
+            if m:
+                contains = (m.group(1) or "").strip()
+
+        args: dict[str, Any] = {}
+        if contains:
+            args["contains"] = contains
+
+        if not args:
+            return Plan(
+                intent="chat",
+                user_message=msg,
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response=(
+                    "Certo — o que você quer revogar exatamente? "
+                    "Exemplos: 'revogar permissões contendo vscode.' ou 'revogar permissão \"vscode.install_extension\"'."
+                ),
+            )
+
+        return Plan(
+            intent="core.approvals_revoke",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.approvals_revoke", args=args)],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou revogar permissões lembradas (requer aprovação).",
+        )
+
+    # Regra: policy (mostrar)
+    if bool(re.search(r"\b(policy|politica)\b", norm)) and bool(
+        re.search(r"\b(mostrar|ver|exibir|listar|status|config|configuracao)\b", norm)
+    ):
+        return Plan(
+            intent="core.policy_show",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.policy_show", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou mostrar a policy efetiva.",
+        )
+
+    # Regra: snapshots (listar)
+    if bool(re.search(r"\b(listar|lista|ver|mostrar|exibir)\b.*\b(snapshot|snapshots)\b", norm)):
+        return Plan(
+            intent="core.snapshot_list",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.snapshot_list", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — vou listar snapshots recentes.",
+        )
+
+    # Regra: snapshots (criar)
+    if bool(re.search(r"\b(criar|gerar|fazer)\b.*\b(snapshot|backup)\b", norm)):
+        return Plan(
+            intent="core.snapshot_create",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.snapshot_create", args={"label": "manual"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou criar um snapshot (zip) do workspace.",
+        )
+
+    # Regra: snapshots (restaurar)
+    if bool(re.search(r"\b(restaurar|rollback|voltar)\b.*\b(snapshot)\b", norm)):
+        m = re.search(r"\b(snapshot)\b\s*[:=]?\s*([a-zA-Z0-9._-]{6,120})", msg)
+        snap_id = (m.group(2) if m else "").strip()
+        if not snap_id:
+            m2 = re.search(r"\b([0-9]{8}_[0-9]{6}_[a-z0-9-]{6,})\b", norm)
+            snap_id = (m2.group(1) if m2 else "").strip()
+
+        if not snap_id:
+            return Plan(
+                intent="chat",
+                user_message=msg,
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response="Qual snapshot_id você quer restaurar? Ex: 'restaurar snapshot 20250101_120000_abc123'.",
+            )
+
+        return Plan(
+            intent="core.snapshot_restore",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.snapshot_restore", args={"snapshot_id": snap_id})],
+            risk=RiskLevel.CRITICAL,
+            final_response="Ok — vou restaurar o snapshot (isso é destrutivo e requer aprovação).",
+        )
+
+    # Regra: memory hygiene (compactar JSONL)
+    if bool(re.search(r"\b(compactar|compacta|limpar|reduzir)\b.*\b(memoria|memory)\b", norm)):
+        return Plan(
+            intent="core.memory_compact",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.memory_compact", args={"keep_last": 5000, "archive": True})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou compactar a memória (mantendo os eventos mais recentes).",
+        )
+
     # Regra: ajuda/tools
     if norm in {"ajuda", "help", "comandos", "commands"}:
         return Plan(
@@ -2798,6 +3177,11 @@ def _route_with_llm_messages(
 
     from omniscia.core.litellm_env import provider_requires_api_key
 
+    def _has_llm_config_values(provider: str | None, model: str | None, api_key: str | None) -> bool:
+        needs_key = provider_requires_api_key(provider)
+        has_key = bool((api_key or "").strip())
+        return bool((provider or "").strip() and (model or "").strip() and (has_key or not needs_key))
+
     needs_key = provider_requires_api_key(settings.llm_provider)
     has_key = bool((settings.llm_api_key or "").strip())
     if not (settings.llm_provider and settings.llm_model and (has_key or not needs_key)):
@@ -2830,12 +3214,24 @@ def _route_with_llm_messages(
             "core.show_settings": "- core.show_settings -> {}",
             "core.list_tools": "- core.list_tools -> {}",
             "core.help": "- core.help -> {}",
+            "core.doctor": "- core.doctor -> {} (LOW; diagnostico offline)",
+            "core.approvals_list": "- core.approvals_list -> {} (LOW; lista aprovacoes lembradas)",
+            "core.approvals_revoke": "- core.approvals_revoke -> {keys?, contains?} (HIGH; revoga por chave ou substring)",
+            "core.approvals_reset": "- core.approvals_reset -> {} (HIGH; limpa todas as aprovacoes lembradas)",
+            "core.policy_show": "- core.policy_show -> {} (LOW; mostra policy)",
+            "core.policy_write": "- core.policy_write -> {policy} (HIGH; escreve policy JSON)",
+            "core.snapshot_create": "- core.snapshot_create -> {label?} (MEDIUM; cria snapshot zip)",
+            "core.snapshot_list": "- core.snapshot_list -> {limit?} (LOW; lista snapshots)",
+            "core.snapshot_restore": "- core.snapshot_restore -> {snapshot_id} (CRITICAL; destrutivo)",
+            "core.memory_compact": "- core.memory_compact -> {keep_last?, archive?, base_dir?} (HIGH; compacta events.jsonl)",
             "echo": "- echo -> {text}",
             "write_file": "- write_file -> {path, content}",
             "os.open_url": "- os.open_url -> {url} (http/https)",
             "os.open_explorer": "- os.open_explorer -> {path?} (path relativo; default '.')",
             "os.open_app": "- os.open_app -> {app} (allowlist via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON)",
             "os.close_app": "- os.close_app -> {app? , title_contains? , timeout_s?}",
+            "os.list_processes": "- os.list_processes -> {query?, max_results?} (Windows; read-only)",
+            "os.list_installed_apps": "- os.list_installed_apps -> {query?, max_results?} (Windows; read-only)",
             "os.mkdir": "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)",
             "fs.list_dir": "- fs.list_dir -> {path}",
             "fs.read_text": "- fs.read_text -> {path, max_chars?}",
@@ -2853,7 +3249,25 @@ def _route_with_llm_messages(
             "gui.click_box_center": "- gui.click_box_center -> {x, y, w, h} (CRITICAL)",
             "gui.type_text": "- gui.type_text -> {text} (CRITICAL)",
             "win.focus_window": "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows)",
+            "win.list_windows": "- win.list_windows -> {title_contains?, visible_only?, include_empty_titles?, max_results?} (LOW; Windows)",
+            "win.foreground_window": "- win.foreground_window -> {} (LOW; Windows)",
+            "vscode.open": "- vscode.open -> {path?} (MEDIUM; usa VS Code CLI 'code'; path relativo; default '.')",
+            "vscode.open_file": "- vscode.open_file -> {path, line?, column?} (MEDIUM; workspace-relative)",
+            "vscode.list_extensions": "- vscode.list_extensions -> {show_versions?} (LOW)",
+            "vscode.install_extension": "- vscode.install_extension -> {extension_id, force?} (HIGH)",
+            "vscode.uninstall_extension": "- vscode.uninstall_extension -> {extension_id} (HIGH)",
+            "vscode.settings_read": "- vscode.settings_read -> {} (LOW; lê .vscode/settings.json)",
+            "vscode.settings_get": "- vscode.settings_get -> {key} (LOW)",
+            "vscode.settings_update": "- vscode.settings_update -> {patch} (HIGH; merge patch em .vscode/settings.json)",
+            "vscode.extensions_read": "- vscode.extensions_read -> {} (LOW; lê .vscode/extensions.json)",
+            "vscode.extensions_update": "- vscode.extensions_update -> {add?, remove?} (HIGH; atualiza recommendations)",
+            "vscode.tasks_read": "- vscode.tasks_read -> {} (LOW; lê .vscode/tasks.json)",
+            "vscode.tasks_update": "- vscode.tasks_update -> {patch} (HIGH; merge patch em .vscode/tasks.json)",
+            "vscode.launch_read": "- vscode.launch_read -> {} (LOW; lê .vscode/launch.json)",
+            "vscode.launch_update": "- vscode.launch_update -> {patch} (HIGH; merge patch em .vscode/launch.json)",
             "web.get_page_text": "- web.get_page_text -> {url, max_chars?}",
+            "web.search": "- web.search -> {query, max_results?}",
+            "web.research": "- web.research -> {query, max_results?, max_pages?, max_chars_per_page?, save_to_memory?, summarize?}",
             "web.screenshot": "- web.screenshot -> {url, path?}",
             "web.get_links": "- web.get_links -> {url, max_links?}",
             "dev.exec": "- dev.exec -> {command, timeout_s?}",
@@ -2868,6 +3282,11 @@ def _route_with_llm_messages(
             "memory.remember": "- memory.remember -> {text, topic?, tags?}",
             "memory.search_vector": "- memory.search_vector -> {query, limit?} (se disponível)",
             "memory.index_recent": "- memory.index_recent -> {limit?} (se disponível)",
+            "memory.index_paths": "- memory.index_paths -> {paths, max_file_mb?, max_files?} (se disponível)",
+            "memory.index_workspace": "- memory.index_workspace -> {max_file_mb?, max_files?} (se disponível)",
+            "memory.profile_get": "- memory.profile_get -> {}",
+            "memory.profile_update": "- memory.profile_update -> {patch}",
+            "memory.profile_reset": "- memory.profile_reset -> {}",
         }
 
         present: list[str] = []
@@ -2882,6 +3301,16 @@ def _route_with_llm_messages(
     static_tools_block = (
         "- core.show_settings -> {}\n"
         "- core.list_tools -> {}\n"
+        "- core.doctor -> {} (LOW; diagnostico offline)\n"
+        "- core.approvals_list -> {} (LOW; lista aprovacoes lembradas)\n"
+        "- core.approvals_revoke -> {keys?, contains?} (HIGH; revoga por chave ou substring)\n"
+        "- core.approvals_reset -> {} (HIGH; limpa todas as aprovacoes lembradas)\n"
+        "- core.policy_show -> {} (LOW; mostra policy)\n"
+        "- core.policy_write -> {policy} (HIGH; escreve policy JSON)\n"
+        "- core.snapshot_create -> {label?} (MEDIUM; cria snapshot zip)\n"
+        "- core.snapshot_list -> {limit?} (LOW; lista snapshots)\n"
+        "- core.snapshot_restore -> {snapshot_id} (CRITICAL; destrutivo)\n"
+        "- core.memory_compact -> {keep_last?, archive?, base_dir?} (HIGH; compacta events.jsonl)\n"
         "- echo -> {text}\n"
         "- write_file -> {path, content}\n"
         "- os.open_url -> {url} (apenas http/https)\n"
@@ -2896,9 +3325,18 @@ def _route_with_llm_messages(
         "- memory.search_vector -> {query, limit} (se disponível)\n"
         "- memory.index_recent -> {limit} (se disponível)\n"
         "- memory.remember -> {text, topic?, tags?} (se disponível; salva memória durável)\n"
+        "- memory.profile_get -> {} (perfil persistente local)\n"
+        "- memory.profile_update -> {patch} (perfil persistente local)\n"
+        "- memory.profile_reset -> {} (perfil persistente local)\n"
         "- web.get_page_text -> {url, max_chars}\n"
+        "- web.search -> {query, max_results?} (read-only)\n"
+        "- web.research -> {query, max_results?, max_pages?, max_chars_per_page?, save_to_memory?, summarize?} (read-only)\n"
         "- web.screenshot -> {url, path?}\n"
         "- web.get_links -> {url, max_links?}\n"
+        "- vscode.tasks_read -> {} (LOW; le .vscode/tasks.json)\n"
+        "- vscode.tasks_update -> {patch} (HIGH; merge patch em .vscode/tasks.json)\n"
+        "- vscode.launch_read -> {} (LOW; le .vscode/launch.json)\n"
+        "- vscode.launch_update -> {patch} (HIGH; merge patch em .vscode/launch.json)\n"
         "- fs.list_dir -> {path}\n"
         "- fs.read_text -> {path, max_chars}\n"
         "- fs.mkdir -> {path}\n"
@@ -2985,9 +3423,9 @@ def _route_with_llm_messages(
     # Não logamos a key; só configuramos no ambiente do litellm.
     from omniscia.core.litellm_env import apply_litellm_env
 
-    apply_litellm_env(settings)
+    def _call_router_llm(call_settings: Settings) -> Plan:
+        apply_litellm_env(call_settings)
 
-    try:
         clean_msgs: list[dict[str, str]] = [{"role": "system", "content": system}]
         for m in messages:
             role = str((m or {}).get("role") or "").strip().lower()
@@ -2998,8 +3436,12 @@ def _route_with_llm_messages(
                     role = "assistant"
                 clean_msgs.append({"role": role, "content": content})
 
-        resp = completion(model=llm_model, messages=clean_msgs, temperature=0.0)
+        base_kwargs: dict[str, Any] = {}
+        api_base = (getattr(call_settings, "llm_base_url", None) or "").strip()
+        if api_base:
+            base_kwargs["api_base"] = api_base
 
+        resp = completion(model=str(call_settings.llm_model), messages=clean_msgs, temperature=0.0, **base_kwargs)
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
 
         # Robustez: alguns modelos devolvem texto extra. Tentamos extrair o primeiro objeto JSON.
@@ -3014,8 +3456,39 @@ def _route_with_llm_messages(
             data = json.loads(raw[start : end + 1])
 
         return Plan.model_validate(data)
+
+    try:
+        return _call_router_llm(settings)
     except Exception as e:  # noqa: BLE001
         from omniscia.core.redact import redact_secrets
+
+        fb_provider = getattr(settings, "llm_fallback_provider", None)
+        fb_model = getattr(settings, "llm_fallback_model", None)
+        fb_key = getattr(settings, "llm_fallback_api_key", None)
+        fb_base = getattr(settings, "llm_fallback_base_url", None)
+
+        if _has_llm_config_values(fb_provider, fb_model, fb_key):
+            logger.warning(
+                "Falha no router LLM principal; tentando fallback (%s)",
+                redact_secrets(str(e)),
+            )
+            try:
+                fb_settings = Settings(
+                    **{
+                        **settings.__dict__,
+                        "llm_provider": fb_provider,
+                        "llm_model": fb_model,
+                        "llm_api_key": fb_key,
+                        "llm_base_url": fb_base,
+                    }
+                )
+                return _call_router_llm(fb_settings)
+            except Exception as e2:  # noqa: BLE001
+                logger.error(
+                    "Falha ao rotear via LLM (principal+fallback); caindo no heurístico (%s)",
+                    redact_secrets(str(e2)),
+                )
+                return None
 
         logger.error(
             "Falha ao rotear via LLM; caindo no heurístico (%s)",

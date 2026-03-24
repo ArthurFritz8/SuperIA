@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import importlib
 import os
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -29,6 +31,30 @@ def _can_import(module: str) -> tuple[bool, str]:
     try:
         importlib.import_module(module)
         return True, "ok"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _which(cmd: str) -> str | None:
+    try:
+        return shutil.which(cmd)
+    except Exception:
+        return None
+
+
+def _run_version(cmd: list[str], *, timeout_s: float = 2.0) -> tuple[bool, str]:
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        out = (p.stdout or "").strip()
+        err = (p.stderr or "").strip()
+        txt = out or err or f"exit={p.returncode}"
+        return p.returncode == 0, txt.splitlines()[0][:240]
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -62,6 +88,47 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
             detail=os.getcwd(),
         )
     )
+
+    # Common CLIs (quality-of-life / dev)
+    code_path = _which("code")
+    if code_path:
+        ok, v = _run_version(["code", "--version"], timeout_s=2.0)
+        checks.append(
+            Check(
+                name="CLI: code",
+                ok=True,
+                detail=f"{code_path} ({v if ok else 'ok'})",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                name="CLI: code",
+                ok=False,
+                detail="não encontrado no PATH",
+                fix="Se for usar VS Code tools: instale o VS Code e habilite o comando 'code' no PATH",
+            )
+        )
+
+    git_path = _which("git")
+    if git_path:
+        ok, v = _run_version(["git", "--version"], timeout_s=2.0)
+        checks.append(
+            Check(
+                name="CLI: git",
+                ok=True,
+                detail=f"{git_path} ({v if ok else 'ok'})",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                name="CLI: git",
+                ok=False,
+                detail="não encontrado no PATH",
+                fix="Instale o Git for Windows (ou adicione git ao PATH)",
+            )
+        )
 
     # Core deps (devem existir sempre)
     for mod in ["typer", "rich", "pydantic", "dotenv", "httpx", "litellm"]:
@@ -198,23 +265,39 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
             )
         )
 
+    # Tesseract CLI (used by OCR)
     if settings.tesseract_cmd:
+        cmd = str(settings.tesseract_cmd)
+        exists = os.path.isfile(cmd) or bool(_which(cmd))
         checks.append(
             Check(
                 name="Tesseract",
-                ok=True,
-                detail=f"tesseract_cmd={settings.tesseract_cmd}",
+                ok=exists,
+                detail=f"tesseract_cmd={cmd}",
+                fix=None if exists else "Verifique o caminho e/ou reinstale o Tesseract; depois ajuste OMNI_TESSERACT_CMD",
             )
         )
     else:
-        checks.append(
-            Check(
-                name="Tesseract",
-                ok=False,
-                detail="tesseract_cmd não configurado",
-                fix="Se for usar OCR: instale o Tesseract e configure OMNI_TESSERACT_CMD no .env",
+        tpath = _which("tesseract")
+        if tpath:
+            ok, v = _run_version(["tesseract", "--version"], timeout_s=2.0)
+            checks.append(
+                Check(
+                    name="Tesseract",
+                    ok=True,
+                    detail=f"{tpath} ({v if ok else 'ok'})",
+                    fix="Opcional: configure OMNI_TESSERACT_CMD para um caminho fixo (evita problemas de PATH)",
+                )
             )
-        )
+        else:
+            checks.append(
+                Check(
+                    name="Tesseract",
+                    ok=False,
+                    detail="não encontrado (nem OMNI_TESSERACT_CMD, nem no PATH)",
+                    fix="Se for usar OCR: instale o Tesseract e configure OMNI_TESSERACT_CMD no .env",
+                )
+            )
 
     ok_all = all(c.ok for c in checks)
 

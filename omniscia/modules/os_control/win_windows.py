@@ -225,6 +225,221 @@ def focus_window_by_title_contains(
     except Exception:
         return None
 
+    user32 = ctypes.windll.user32
+
+    WNDENUMPROC = getattr(
+        wintypes,
+        "WNDENUMPROC",
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
+    )
+
+    EnumWindows = user32.EnumWindows
+    EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    EnumWindows.restype = wintypes.BOOL
+
+    GetWindowTextW = user32.GetWindowTextW
+    GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    GetWindowTextW.restype = ctypes.c_int
+
+    IsWindowVisible = user32.IsWindowVisible
+    IsWindowVisible.argtypes = [wintypes.HWND]
+    IsWindowVisible.restype = wintypes.BOOL
+
+    ShowWindow = user32.ShowWindow
+    ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    ShowWindow.restype = wintypes.BOOL
+
+    SetForegroundWindow = user32.SetForegroundWindow
+    SetForegroundWindow.argtypes = [wintypes.HWND]
+    SetForegroundWindow.restype = wintypes.BOOL
+
+    GetWindowRect = user32.GetWindowRect
+    GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    GetWindowRect.restype = wintypes.BOOL
+
+    SW_RESTORE = 9
+
+    def _get_title(hwnd: int) -> str:
+        buf = ctypes.create_unicode_buffer(512)
+        try:
+            GetWindowTextW(hwnd, buf, 512)
+            return (buf.value or "").strip()
+        except Exception:
+            return ""
+
+    found_hwnd: int | None = None
+    best_title: str = ""
+    needle_cf = needle.casefold()
+
+    @WNDENUMPROC
+    def _enum_proc(hwnd, lparam):  # noqa: ANN001
+        nonlocal found_hwnd, best_title
+        try:
+            if visible_only and not IsWindowVisible(hwnd):
+                return True
+            title = _get_title(int(hwnd))
+            if not title:
+                return True
+            if needle_cf in title.casefold():
+                if found_hwnd is None or len(title) > len(best_title):
+                    found_hwnd = int(hwnd)
+                    best_title = title
+        except Exception:
+            return True
+        return True
+
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline and found_hwnd is None:
+        try:
+            EnumWindows(_enum_proc, 0)
+        except Exception:
+            break
+        if found_hwnd is None:
+            time.sleep(0.1)
+
+    if found_hwnd is None:
+        return None
+
+    try:
+        ShowWindow(found_hwnd, SW_RESTORE)
+        SetForegroundWindow(found_hwnd)
+        time.sleep(0.2)
+        rect = wintypes.RECT()
+        if not GetWindowRect(found_hwnd, ctypes.byref(rect)):
+            return None
+        return {
+            "left": int(rect.left),
+            "top": int(rect.top),
+            "right": int(rect.right),
+            "bottom": int(rect.bottom),
+        }
+    except Exception:
+        return None
+
+
+def list_top_level_windows(
+    *,
+    title_contains: str | None = None,
+    visible_only: bool = True,
+    include_empty_titles: bool = False,
+    max_results: int = 200,
+) -> list[dict[str, object]]:
+    """List top-level windows with titles.
+
+    Returns a list of dicts: {title, hwnd, pid, rect, visible}.
+    Best-effort and Windows-only.
+    """
+
+    if not sys.platform.startswith("win"):
+        return []
+
+    try:
+        import ctypes
+        from ctypes import wintypes
+    except Exception:
+        return []
+
+    if max_results < 1:
+        max_results = 1
+    if max_results > 2000:
+        max_results = 2000
+
+    user32 = ctypes.windll.user32
+
+    WNDENUMPROC = getattr(
+        wintypes,
+        "WNDENUMPROC",
+        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
+    )
+
+    EnumWindows = user32.EnumWindows
+    EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
+    EnumWindows.restype = wintypes.BOOL
+
+    GetWindowTextW = user32.GetWindowTextW
+    GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    GetWindowTextW.restype = ctypes.c_int
+
+    IsWindowVisible = user32.IsWindowVisible
+    IsWindowVisible.argtypes = [wintypes.HWND]
+    IsWindowVisible.restype = wintypes.BOOL
+
+    GetWindowRect = user32.GetWindowRect
+    GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    GetWindowRect.restype = wintypes.BOOL
+
+    GetWindowThreadProcessId = user32.GetWindowThreadProcessId
+    GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    GetWindowThreadProcessId.restype = wintypes.DWORD
+
+    needle_cf = (title_contains or "").strip().casefold()
+
+    def _get_title(hwnd: int) -> str:
+        buf = ctypes.create_unicode_buffer(512)
+        try:
+            GetWindowTextW(hwnd, buf, 512)
+            return (buf.value or "").strip()
+        except Exception:
+            return ""
+
+    out: list[dict[str, object]] = []
+
+    @WNDENUMPROC
+    def _enum_proc(hwnd, lparam):  # noqa: ANN001
+        try:
+            if len(out) >= max_results:
+                return False
+            is_visible = bool(IsWindowVisible(hwnd))
+            if visible_only and not is_visible:
+                return True
+            title = _get_title(int(hwnd))
+            if not title and not include_empty_titles:
+                return True
+            if needle_cf and needle_cf not in title.casefold():
+                return True
+
+            pid = wintypes.DWORD()
+            try:
+                GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                pid_i = int(pid.value)
+            except Exception:
+                pid_i = 0
+
+            rect = wintypes.RECT()
+            rect_obj = None
+            try:
+                if GetWindowRect(hwnd, ctypes.byref(rect)):
+                    rect_obj = {
+                        "left": int(rect.left),
+                        "top": int(rect.top),
+                        "right": int(rect.right),
+                        "bottom": int(rect.bottom),
+                    }
+            except Exception:
+                rect_obj = None
+
+            out.append(
+                {
+                    "title": title,
+                    "hwnd": int(hwnd),
+                    "pid": pid_i,
+                    "rect": rect_obj,
+                    "visible": is_visible,
+                }
+            )
+        except Exception:
+            return True
+        return True
+
+    try:
+        EnumWindows(_enum_proc, 0)
+    except Exception:
+        return out
+
+    # Prefer deterministic output: longer titles first (often more informative).
+    out.sort(key=lambda d: len(str(d.get("title") or "")), reverse=True)
+    return out
+
 
 def focus_window_by_class_name(
     class_name: str,
@@ -323,100 +538,6 @@ def focus_window_by_class_name(
             if found_hwnd is None or len(title) > len(best_title):
                 found_hwnd = int(hwnd)
                 best_title = title
-        except Exception:
-            return True
-        return True
-
-    deadline = time.time() + float(timeout_s)
-    while time.time() < deadline and found_hwnd is None:
-        try:
-            EnumWindows(_enum_proc, 0)
-        except Exception:
-            break
-        if found_hwnd is None:
-            time.sleep(0.1)
-
-    if found_hwnd is None:
-        return None
-
-    try:
-        ShowWindow(found_hwnd, SW_RESTORE)
-        SetForegroundWindow(found_hwnd)
-        time.sleep(0.2)
-        rect = wintypes.RECT()
-        if not GetWindowRect(found_hwnd, ctypes.byref(rect)):
-            return None
-        return {
-            "left": int(rect.left),
-            "top": int(rect.top),
-            "right": int(rect.right),
-            "bottom": int(rect.bottom),
-        }
-    except Exception:
-        return None
-
-    user32 = ctypes.windll.user32
-
-    # Some Python/ctypes builds don't expose wintypes.WNDENUMPROC.
-    # Define the callback type explicitly for EnumWindows.
-    WNDENUMPROC = getattr(
-        wintypes,
-        "WNDENUMPROC",
-        ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM),
-    )
-
-    EnumWindows = user32.EnumWindows
-    EnumWindows.argtypes = [WNDENUMPROC, wintypes.LPARAM]
-    EnumWindows.restype = wintypes.BOOL
-
-    GetWindowTextW = user32.GetWindowTextW
-    GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    GetWindowTextW.restype = ctypes.c_int
-
-    IsWindowVisible = user32.IsWindowVisible
-    IsWindowVisible.argtypes = [wintypes.HWND]
-    IsWindowVisible.restype = wintypes.BOOL
-
-    ShowWindow = user32.ShowWindow
-    ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    ShowWindow.restype = wintypes.BOOL
-
-    SetForegroundWindow = user32.SetForegroundWindow
-    SetForegroundWindow.argtypes = [wintypes.HWND]
-    SetForegroundWindow.restype = wintypes.BOOL
-
-    GetWindowRect = user32.GetWindowRect
-    GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-    GetWindowRect.restype = wintypes.BOOL
-
-    SW_RESTORE = 9
-
-    def _get_title(hwnd: int) -> str:
-        buf = ctypes.create_unicode_buffer(512)
-        try:
-            GetWindowTextW(hwnd, buf, 512)
-            return (buf.value or "").strip()
-        except Exception:
-            return ""
-
-    found_hwnd: int | None = None
-    best_title: str = ""
-    needle_cf = needle.casefold()
-
-    @WNDENUMPROC
-    def _enum_proc(hwnd, lparam):  # noqa: ANN001
-        nonlocal found_hwnd, best_title
-        try:
-            if visible_only and not IsWindowVisible(hwnd):
-                return True
-            title = _get_title(int(hwnd))
-            if not title:
-                return True
-            if needle_cf in title.casefold():
-                # Prefer longer titles (often includes context like server/channel).
-                if found_hwnd is None or len(title) > len(best_title):
-                    found_hwnd = int(hwnd)
-                    best_title = title
         except Exception:
             return True
         return True

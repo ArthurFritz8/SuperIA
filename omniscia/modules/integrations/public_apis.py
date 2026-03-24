@@ -140,6 +140,7 @@ import json
 import os
 import re
 import unicodedata
+import html
 from datetime import datetime, timedelta, timezone
 from typing import Any, cast
 from urllib.parse import quote
@@ -172,6 +173,9 @@ _ALLOWED_HOSTS = {
     "export.arxiv.org",
     # Tavily
     "api.tavily.com",
+    # DuckDuckGo (fallback web search, sem chave)
+    "duckduckgo.com",
+    "html.duckduckgo.com",
     # OpenStreetMap / Nominatim
     "nominatim.openstreetmap.org",
     # OSRM demo
@@ -388,10 +392,11 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
         ToolSpec(
             name="web.search",
             description=(
-                "Busca web via Tavily (requer OMNI_TAVILY_API_KEY). Args: query, max_results?, depth? (basic|advanced)"
+                "Busca web (Tavily se OMNI_TAVILY_API_KEY estiver configurada; senão fallback DuckDuckGo). "
+                "Args: query, max_results?, depth? (basic|advanced; Tavily)"
             ),
             risk="MEDIUM",
-            fn=_tavily_search,
+            fn=_web_search,
         )
     )
 
@@ -1367,6 +1372,100 @@ def _http_form(
             return None, "resposta não é JSON"
     except Exception as exc:  # noqa: BLE001
         return None, str(exc)
+
+
+def _http_text(
+    *,
+    url: str,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout_s: float = 12.0,
+) -> tuple[str | None, str | None]:
+    """HTTP GET retornando texto (HTML/Plain)."""
+    try:
+        u = httpx.URL(url)
+        host = (u.host or "").lower()
+        if u.scheme != "https":
+            return None, "apenas https é permitido"
+        if host not in _ALLOWED_HOSTS:
+            return None, f"host não permitido: {host}"
+
+        merged_headers = {**_default_headers(), **(headers or {})}
+        merged_headers.setdefault("Accept", "text/html, text/plain; q=0.9, */*; q=0.1")
+
+        with httpx.Client(timeout=timeout_s, follow_redirects=True) as client:
+            resp = client.get(url, params=params, headers=merged_headers)
+        if resp.status_code >= 400:
+            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        return resp.text, None
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+
+
+def _web_search(args: dict[str, Any]) -> ToolResult:
+    """Busca web com fallback.
+
+    Preferência:
+    - Tavily quando OMNI_TAVILY_API_KEY está configurada.
+    - Caso contrário, DuckDuckGo (HTML) sem chave.
+    """
+
+    api_key = (os.getenv("OMNI_TAVILY_API_KEY") or "").strip()
+    if api_key:
+        return _tavily_search(args)
+    return _duckduckgo_search(args)
+
+
+def _duckduckgo_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        max_results = int(args.get("max_results", 5) or 5)
+    except Exception:
+        max_results = 5
+    if max_results < 1:
+        max_results = 1
+    if max_results > 10:
+        max_results = 10
+
+    # Endpoint HTML simples (mais fácil de parsear e sem JS).
+    text, err = _http_text(
+        url="https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers={"Accept": "text/html"},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    if not text:
+        return ToolResult(status="error", error="resposta vazia")
+
+    # Parse mínimo por regex (intencionalmente simples e best-effort).
+    # Formato típico:
+    # <a rel="nofollow" class="result__a" href="...">Title</a>
+    # <a class="result__snippet">Snippet</a>
+    titles_urls = re.findall(r"<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>", text, flags=re.IGNORECASE | re.DOTALL)
+    snippets = re.findall(r"<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>", text, flags=re.IGNORECASE | re.DOTALL)
+
+    def _clean(s: str) -> str:
+        s2 = re.sub(r"<.*?>", "", s or "")
+        s2 = html.unescape(s2)
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        return s2
+
+    slim: list[dict[str, Any]] = []
+    for i, (url, title) in enumerate(titles_urls[:max_results]):
+        t = _clean(title)[:160]
+        u = html.unescape(url).strip()
+        sn = _clean(snippets[i] if i < len(snippets) else "")[:600]
+        if not u:
+            continue
+        slim.append({"title": t, "url": u, "content": sn, "source": "duckduckgo"})
+
+    out = {"query": query, "results": slim}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
 def _wikipedia_summary(args: dict[str, Any]) -> ToolResult:

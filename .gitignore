@@ -23,6 +23,12 @@ build/
 /data/tmp/
 /data/memory/
 
+# Run logs / snapshots (gerados em tempo de execução)
+/data/runs/*
+!/data/runs/.gitkeep
+/data/snapshots/*
+!/data/snapshots/.gitkeep
+
 # Local models / artifacts (não commitar)
 /data/models/
 /vosk-model-*/

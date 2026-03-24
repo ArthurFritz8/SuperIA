@@ -52,12 +52,25 @@ def main() -> int:
         print(f"deps de memória vetorial indisponíveis: {exc}")
         return 2
 
-    vm = ChromaVectorMemory(persist_dir="data/chroma", collection="omniscia_memory")
+    persist_dir = (os.getenv("OMNI_VECTOR_MEMORY_PERSIST_DIR") or "").strip() or "data/chroma"
+    collection = (os.getenv("OMNI_VECTOR_MEMORY_COLLECTION") or "").strip() or "omniscia_memory"
+    embed_model = (os.getenv("OMNI_VECTOR_MEMORY_EMBED_MODEL") or "").strip() or "all-MiniLM-L6-v2"
+    max_file_mb_raw = (os.getenv("OMNI_INDEX_MAX_FILE_MB") or "").strip()
+    try:
+        max_file_mb = int(max_file_mb_raw) if max_file_mb_raw else 4
+    except Exception:
+        max_file_mb = 4
+    if max_file_mb < 1:
+        max_file_mb = 1
+    if max_file_mb > 25:
+        max_file_mb = 25
+
+    vm = ChromaVectorMemory(persist_dir=persist_dir, collection=collection, embed_model=embed_model)
 
     def _index_one(fp: Path) -> None:
         # Indexa o arquivo específico (se suportado) passando o próprio path.
         try:
-            index_paths_to_vector(vm=vm, paths=[str(fp)], source="omni-index-daemon")
+            index_paths_to_vector(vm=vm, paths=[str(fp)], source="omni-index-daemon", max_file_mb=max_file_mb)
         except Exception:
             return
 
@@ -95,7 +108,7 @@ def main() -> int:
 
     print("Indexação inicial...")
     try:
-        seen, indexed = index_paths_to_vector(vm=vm, paths=paths, source="omni-index-daemon-initial")
+        seen, indexed = index_paths_to_vector(vm=vm, paths=paths, source="omni-index-daemon-initial", max_file_mb=max_file_mb)
         print(f"initial: seen_files={seen} indexed_items={indexed}")
     except Exception as exc:
         print(f"indexação inicial falhou: {exc}")

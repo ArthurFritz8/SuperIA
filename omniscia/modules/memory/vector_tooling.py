@@ -31,9 +31,9 @@ def register_vector_memory_tools(
     settings: Settings,
 ) -> None:
     vm = ChromaVectorMemory(
-        persist_dir="data/chroma",
-        collection="omniscia_memory",
-        embed_model=("all-MiniLM-L6-v2"),
+        persist_dir=str(getattr(settings, "vector_memory_persist_dir", "data/chroma") or "data/chroma"),
+        collection=str(getattr(settings, "vector_memory_collection", "omniscia_memory") or "omniscia_memory"),
+        embed_model=str(getattr(settings, "vector_memory_embed_model", "all-MiniLM-L6-v2") or "all-MiniLM-L6-v2"),
     )
 
     registry.register(
@@ -72,6 +72,18 @@ def register_vector_memory_tools(
             ),
             risk="LOW",
             fn=lambda args: _index_paths(args, vm=vm),
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="memory.index_workspace",
+            description=(
+                "Indexa um conjunto padrão do workspace na memória vetorial (RAG). "
+                "Útil para deixar o agente 'mais inteligente' no seu projeto. Args: max_file_mb?"
+            ),
+            risk="LOW",
+            fn=lambda args: _index_workspace(args, vm=vm),
         )
     )
 
@@ -206,7 +218,44 @@ def _index_paths(args: dict[str, Any], *, vm: ChromaVectorMemory) -> ToolResult:
     try:
         from omniscia.modules.memory.omni_indexer import index_paths_to_vector
 
-        seen, indexed = index_paths_to_vector(vm=vm, paths=raw_paths, source="memory.index_paths")
+        seen, indexed = index_paths_to_vector(
+            vm=vm,
+            paths=raw_paths,
+            source="memory.index_paths",
+            max_file_mb=max_file_mb,
+        )
+        return ToolResult(status="ok", output=f"seen_files={seen} indexed_items={indexed}")
+    except Exception as exc:  # noqa: BLE001
+        return ToolResult(status="error", error=str(exc))
+
+
+def _index_workspace(args: dict[str, Any], *, vm: ChromaVectorMemory) -> ToolResult:
+    # Conjunto padrão conservador (útil na maioria dos projetos).
+    default_paths = [
+        "README.md",
+        "pyproject.toml",
+        "requirements.txt",
+        "omniscia",
+        "tests",
+        "scripts",
+        "data",
+    ]
+
+    max_file_mb = int(args.get("max_file_mb", 4) or 4)
+    if max_file_mb < 1:
+        max_file_mb = 1
+    if max_file_mb > 25:
+        max_file_mb = 25
+
+    try:
+        from omniscia.modules.memory.omni_indexer import index_paths_to_vector
+
+        seen, indexed = index_paths_to_vector(
+            vm=vm,
+            paths=default_paths,
+            source="memory.index_workspace",
+            max_file_mb=max_file_mb,
+        )
         return ToolResult(status="ok", output=f"seen_files={seen} indexed_items={indexed}")
     except Exception as exc:  # noqa: BLE001
         return ToolResult(status="error", error=str(exc))

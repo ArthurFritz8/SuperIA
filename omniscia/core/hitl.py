@@ -17,6 +17,7 @@ import sys
 from typing import Any
 
 from omniscia.core.types import Plan, RiskLevel
+from omniscia.core.approvals import ApprovalStore
 
 
 def require_approval(
@@ -25,6 +26,8 @@ def require_approval(
     enabled: bool,
     min_risk: RiskLevel = RiskLevel.CRITICAL,
     require_token: bool = False,
+    remember: bool = False,
+    approvals: ApprovalStore | None = None,
 ) -> bool:
     """Retorna True se aprovado, False se negado.
 
@@ -43,6 +46,21 @@ def require_approval(
     if _risk_rank(plan.risk) < _risk_rank(min_risk):
         return True
 
+    # Nunca auto-aprovar CRITICAL via cache.
+    approval_keys: list[str] = []
+    if remember and approvals is not None and plan.risk != RiskLevel.CRITICAL:
+        try:
+            calls = [
+                {"tool_name": c.tool_name, "args": (c.args or {})}
+                for c in (plan.tool_calls or [])
+            ]
+            approval_keys = approvals.keys_for_calls(calls)
+            if approval_keys and approvals.is_allowed_all(approval_keys):
+                print("\n[HITL] Auto-aprovado (permissão lembrada).")
+                return True
+        except Exception:
+            approval_keys = []
+
     token = secrets.token_hex(2).upper() if require_token else None
 
     print("\n[HITL] APROVAÇÃO NECESSÁRIA")
@@ -55,7 +73,12 @@ def require_approval(
         args_str = json.dumps(safe_args, ensure_ascii=False)
         if len(args_str) > 300:
             args_str = args_str[:300] + "... [truncado]"
-        print(f"  {i}. {call.tool_name} args={args_str}")
+        summary = _summarize_call(call.tool_name, safe_args)
+        if summary:
+            print(f"  {i}. {call.tool_name}  ({summary})")
+            print(f"     args={args_str}")
+        else:
+            print(f"  {i}. {call.tool_name} args={args_str}")
 
     if require_token:
         assert token is not None
@@ -75,9 +98,21 @@ def require_approval(
     if require_token:
         assert token is not None
         if up == f"YES {token}":
+            if remember and approvals is not None and approval_keys and plan.risk != RiskLevel.CRITICAL:
+                try:
+                    approvals.allow(approval_keys)
+                    approvals.save()
+                except Exception:
+                    pass
             return True
     else:
         if up == "YES":
+            if remember and approvals is not None and approval_keys and plan.risk != RiskLevel.CRITICAL:
+                try:
+                    approvals.allow(approval_keys)
+                    approvals.save()
+                except Exception:
+                    pass
             return True
 
     print("[HITL] Negado pelo usuário. Ação cancelada.")
@@ -112,3 +147,47 @@ def _redact_args(args: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             safe[str(k)] = "[unprintable]"
     return safe
+
+
+def _summarize_call(tool_name: str, args: dict[str, Any]) -> str:
+    """Gera um sumário curto e humano para o preview do HITL."""
+
+    t = (tool_name or "").strip()
+    a = args or {}
+
+    def _s(k: str) -> str:
+        return str(a.get(k, "") or "").strip()
+
+    if t in {"os.open_url", "web.get_page_text", "web.screenshot", "web.get_links"}:
+        u = _s("url")
+        return f"url={u[:120]}" if u else ""
+
+    if t in {"vscode.open_file", "fs.read_text", "fs.list_dir", "fs.mkdir", "fs.delete"}:
+        p = _s("path")
+        return f"path={p}" if p else ""
+
+    if t in {"fs.copy", "fs.move"}:
+        src = _s("src")
+        dst = _s("dst")
+        if src and dst:
+            return f"{src} -> {dst}"
+        return ""
+
+    if t in {"vscode.install_extension", "vscode.uninstall_extension"}:
+        eid = _s("extension_id")
+        return f"id={eid}" if eid else ""
+
+    if t in {"core.approvals_revoke"}:
+        contains = _s("contains")
+        keys = a.get("keys")
+        if contains:
+            return f"contains={contains}"
+        if isinstance(keys, list) and keys:
+            return f"keys={len(keys)}"
+        return ""
+
+    if t in {"core.snapshot_restore"}:
+        sid = _s("snapshot_id")
+        return f"snapshot_id={sid}" if sid else ""
+
+    return ""

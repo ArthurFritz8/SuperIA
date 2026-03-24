@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "default_action": "allow",
+  "allow": [],
+  "deny": [],
+  "deny_risk_at_or_above": null,
+  "allowed_path_prefixes": []
+}

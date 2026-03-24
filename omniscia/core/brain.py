@@ -26,6 +26,10 @@ from rich.panel import Panel
 
 from omniscia.core.config import Settings
 from omniscia.core.hitl import require_approval
+from omniscia.core.approvals import ApprovalStore
+from omniscia.core.policy import PolicyEngine
+from omniscia.core.runlog import RunLogger
+from omniscia.core.snapshots import SnapshotManager
 from omniscia.core.router import route_llm, route_with_registry
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
@@ -35,6 +39,7 @@ from omniscia.core.workers import WorkerManager
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.tts.factory import build_tts
 from omniscia.modules.memory.store import JsonlMemoryStore
+from omniscia.modules.memory.profile_store import UserProfileStore
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +50,29 @@ def run_brain_loop(settings: Settings) -> None:
     console = Console()
     memory = JsonlMemoryStore()
     registry = build_default_registry(settings=settings, memory_store=memory)
+    profile_store = UserProfileStore()
+
+    # HITL approvals persistentes (opt-in via settings). Carrega uma vez por sessão.
+    approvals = ApprovalStore(getattr(settings, "hitl_approvals_path", "data/hitl_approvals.json"))
+    try:
+        approvals.load()
+    except Exception:
+        pass
     stt = build_stt(settings, console=console)
     tts = build_tts(settings, console=console)
+
+    # Policy engine (offline guardrails)
+    policy = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
+    try:
+        policy.load()
+    except Exception:
+        pass
+
+    # Snapshots + runlog (observabilidade)
+    snapshot_mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
+    runlog = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+
+    last_plan: Plan | None = None
 
     # Permissões por sessão (não persistem no .env): auto-programação / tools custom.
     session_self_coding_granted = False
@@ -71,9 +97,9 @@ def run_brain_loop(settings: Settings) -> None:
             from omniscia.modules.memory.vector_store import ChromaVectorMemory
 
             vector_memory = ChromaVectorMemory(
-                persist_dir="data/chroma",
-                collection="omniscia_memory",
-                embed_model="all-MiniLM-L6-v2",
+                persist_dir=str(getattr(settings, "vector_memory_persist_dir", "data/chroma") or "data/chroma"),
+                collection=str(getattr(settings, "vector_memory_collection", "omniscia_memory") or "omniscia_memory"),
+                embed_model=str(getattr(settings, "vector_memory_embed_model", "all-MiniLM-L6-v2") or "all-MiniLM-L6-v2"),
             )
             console.print("[dim]Memória vetorial habilitada (RAG).[/dim]")
         except Exception as exc:  # noqa: BLE001
@@ -289,7 +315,58 @@ def run_brain_loop(settings: Settings) -> None:
 
         memory.append("user_message", {"text": user_message})
 
-        plan = route_with_registry(settings, user_message, registry=registry)
+        profile_ctx = profile_store.to_context_text(max_chars=1200)
+        router_ctx: list[dict[str, str]] = []
+        if profile_ctx:
+            router_ctx.append({"role": "assistant", "content": profile_ctx})
+
+        # Replay do último plano (sessão) — opt-in.
+        replay_norm = re.sub(r"\s+", " ", (user_message or "").strip().lower())
+        wants_replay = replay_norm in {
+            "replay",
+            "redo",
+            "repetir",
+            "reexecutar",
+            "rodar de novo",
+            "faça de novo",
+            "faca de novo",
+        }
+        if wants_replay and getattr(settings, "replay_enabled", True):
+            if last_plan is None:
+                console.print("Agente> Não tenho um plano anterior para repetir nesta sessão.")
+                continue
+            console.print("[dim]Reexecutando o último plano (replay).[/dim]")
+            plan = last_plan.model_copy(update={"user_message": user_message.strip()})
+        else:
+            plan = route_with_registry(settings, user_message, registry=registry, context_messages=router_ctx or None)
+
+        # Meta-raciocínio (opt-in): revisa o plano com um "critic" antes de executar.
+        # Objetivo: reduzir planos inválidos/ineficientes e melhorar coerência.
+        if (
+            getattr(settings, "plan_critic_enabled", False)
+            and settings.router_mode == "llm"
+            and plan is not None
+            and (plan.intent or "").strip() not in {"chat", "exit"}
+            and bool(plan.tool_calls)
+        ):
+            revised = _criticize_plan_best_effort(settings=settings, registry=registry, user_message=user_message, plan=plan)
+            if revised is not None:
+                memory.append(
+                    "plan_critic",
+                    {
+                        "original": {
+                            "intent": plan.intent,
+                            "risk": str(plan.risk),
+                            "tool_calls": [c.model_dump() for c in plan.tool_calls],
+                        },
+                        "revised": {
+                            "intent": revised.intent,
+                            "risk": str(revised.risk),
+                            "tool_calls": [c.model_dump() for c in revised.tool_calls],
+                        },
+                    },
+                )
+                plan = revised
 
         # Para mensagens de orientação/conversa, responda diretamente com LLM (sem tools).
         # Isso deixa o assistente muito mais "Jarvis" no dia-a-dia.
@@ -338,6 +415,8 @@ def run_brain_loop(settings: Settings) -> None:
                         enabled=settings.hitl_enabled,
                         min_risk=settings.hitl_min_risk,
                         require_token=settings.hitl_require_token,
+                        remember=getattr(settings, "hitl_remember_approvals", False),
+                        approvals=approvals,
                     ):
                         image_path = None
 
@@ -346,6 +425,7 @@ def run_brain_loop(settings: Settings) -> None:
                     effective_user_message,
                     history=history,
                     image_path=image_path,
+                    profile_context=profile_ctx,
                 )
                 console.print(f"Agente> {response_text}")
                 memory.append("agent_response", {"text": response_text})
@@ -360,6 +440,17 @@ def run_brain_loop(settings: Settings) -> None:
                         console=console,
                         settings=settings,
                         registry=registry,
+                        memory=memory,
+                        user_message=user_message,
+                        assistant_response=response_text,
+                    )
+
+                if getattr(settings, "profile_auto_update", False) and settings.router_mode == "llm":
+                    _auto_profile_update_best_effort(
+                        console=console,
+                        settings=settings,
+                        registry=registry,
+                        profile_store=profile_store,
                         memory=memory,
                         user_message=user_message,
                         assistant_response=response_text,
@@ -389,6 +480,10 @@ def run_brain_loop(settings: Settings) -> None:
             },
         )
 
+        # Keep last plan for replay (session-only)
+        if plan.tool_calls and plan.intent not in {"chat", "exit"}:
+            last_plan = plan
+
         if plan.intent == "exit":
             console.print(plan.final_response or "Encerrando.")
             return
@@ -410,6 +505,22 @@ def run_brain_loop(settings: Settings) -> None:
                     "retry_max_attempts": settings.retry_max_attempts,
                     "retry_backoff_s": settings.retry_backoff_s,
                     "retry_side_effect_tools": settings.retry_side_effect_tools,
+                },
+            )
+            continue
+
+        if plan.intent in {"core.autonomy_on", "core.autonomy_off"}:
+            enable = (plan.intent == "core.autonomy_on")
+            settings = replace(settings, autonomy_enabled=enable)
+            console.print(
+                f"Agente> {plan.final_response or ('Autonomia ' + ('ativada' if enable else 'desativada') + '.') }"
+            )
+            memory.append(
+                "session_toggle",
+                {
+                    "autonomy_enabled": getattr(settings, "autonomy_enabled", False),
+                    "autonomy_max_steps": getattr(settings, "autonomy_max_steps", 12),
+                    "autonomy_checkpoint_every": getattr(settings, "autonomy_checkpoint_every", 4),
                 },
             )
             continue
@@ -483,6 +594,8 @@ def run_brain_loop(settings: Settings) -> None:
                     enabled=settings.hitl_enabled,
                     min_risk=settings.hitl_min_risk,
                     require_token=settings.hitl_require_token,
+                    remember=getattr(settings, "hitl_remember_approvals", False),
+                    approvals=approvals,
                 ):
                     console.print("Agente> Ok, não vou habilitar auto-programação nesta sessão.")
                     # Cancela a execução do plano original.
@@ -495,9 +608,54 @@ def run_brain_loop(settings: Settings) -> None:
                 console.print("[dim]Auto-programação habilitada nesta sessão.[/dim]")
 
         if settings.router_mode == "llm" and plan.tool_calls:
-            response_text = _execute_plan_react(console, settings, registry, plan, memory, worker_mgr=worker_mgr)
+            response_text = _execute_plan_react(
+                console,
+                settings,
+                registry,
+                plan,
+                memory,
+                approvals=approvals,
+                remember=getattr(settings, "hitl_remember_approvals", False),
+                worker_mgr=worker_mgr,
+            )
         else:
-            response_text = _execute_plan(console, settings, registry, plan, memory, worker_mgr=worker_mgr)
+            response_text = _execute_plan(
+                console,
+                settings,
+                registry,
+                plan,
+                memory,
+                approvals=approvals,
+                remember=getattr(settings, "hitl_remember_approvals", False),
+                worker_mgr=worker_mgr,
+            )
+
+        # Aprendizagem contínua (opt-in): também vale para execuções com tools.
+        if (
+            response_text
+            and getattr(settings, "vector_memory_enabled", False)
+            and getattr(settings, "vector_memory_auto_remember", False)
+            and settings.router_mode == "llm"
+        ):
+            _auto_remember_best_effort(
+                console=console,
+                settings=settings,
+                registry=registry,
+                memory=memory,
+                user_message=user_message,
+                assistant_response=str(response_text),
+            )
+
+        if response_text and getattr(settings, "profile_auto_update", False) and settings.router_mode == "llm":
+            _auto_profile_update_best_effort(
+                console=console,
+                settings=settings,
+                registry=registry,
+                profile_store=profile_store,
+                memory=memory,
+                user_message=user_message,
+                assistant_response=str(response_text),
+            )
         if tts.enabled and getattr(settings, "tts_speak_responses", False) and response_text:
             # Evita falar textos gigantes acidentalmente.
             t = response_text.strip()
@@ -621,8 +779,12 @@ def _auto_remember_best_effort(
     """
 
     try:
-        # Só vale a pena para respostas mais "densas".
-        if len((assistant_response or "").strip()) < 450:
+        # Só vale a pena para respostas mais "densas" OU quando houve execução de tools.
+        resp = (assistant_response or "").strip()
+        recent = memory.recent(limit=40)
+        tool_events = [e for e in recent if e.kind == "tool_output"]
+        has_tool_trace = bool(tool_events)
+        if len(resp) < 450 and not has_tool_trace:
             return
 
         prompt = (
@@ -632,10 +794,33 @@ def _auto_remember_best_effort(
             "O campo text deve ter 1-4 linhas, objetivo e reutilizável."
         )
 
+        # Inclui um rastro compacto de tool outputs recentes para memórias episódicas úteis.
+        trace_lines: list[str] = []
+        for ev in tool_events[:8]:
+            p = ev.payload or {}
+            tool = str(p.get("tool", "") or "").strip()
+            status = str(p.get("status", "") or "").strip()
+            out = str(p.get("output", "") or "").strip()
+            err = str(p.get("error", "") or "").strip()
+            if out and len(out) > 450:
+                out = out[:450] + "..."
+            if err and len(err) > 300:
+                err = err[:300] + "..."
+            trace_lines.append(f"- {tool} status={status}")
+            if out:
+                trace_lines.append("  OUTPUT: " + out.replace("\n", " ")[:520])
+            if err:
+                trace_lines.append("  ERROR: " + err.replace("\n", " ")[:360])
+        trace_blob = "\n".join(trace_lines).strip()
+        if len(trace_blob) > 2500:
+            trace_blob = trace_blob[:2500] + "\n... [truncado]"
+
         ctx = [
             {"role": "user", "content": str(user_message or "").strip()},
-            {"role": "assistant", "content": str(assistant_response or "").strip()[:2000]},
+            {"role": "assistant", "content": resp[:2000]},
         ]
+        if trace_blob:
+            ctx.append({"role": "assistant", "content": "RECENT_TOOL_TRACE:\n" + trace_blob})
 
         plan = route_llm(settings, prompt, context_messages=ctx, registry=registry)
         if plan is None or not plan.tool_calls:
@@ -661,6 +846,111 @@ def _auto_remember_best_effort(
         )
     except Exception as exc:  # noqa: BLE001
         console.print(f"[dim]Auto-remember falhou (best-effort):[/dim] {exc}")
+
+
+def _criticize_plan_best_effort(*, settings: Settings, registry, user_message: str, plan: Plan) -> Plan | None:
+    """Revisa um plano via LLM (best-effort).
+
+    - Não pode quebrar o fluxo; se falhar, retorna None.
+    - Mantém o user_message original; adiciona o plano atual como contexto.
+    """
+
+    try:
+        draft = {
+            "intent": plan.intent,
+            "risk": str(plan.risk),
+            "tool_calls": [c.model_dump() for c in plan.tool_calls],
+            "final_response": plan.final_response,
+        }
+        draft_json = json.dumps(draft, ensure_ascii=False)[:6000]
+
+        ctx = [
+            {
+                "role": "assistant",
+                "content": (
+                    "INTERNAL: Você é um critic de plano. Revise o plano abaixo e melhore se necessário. "
+                    "Regras: use apenas tools registradas; minimize risco; evite passos desnecessários; "
+                    "se faltar info, prefira fazer 1-3 perguntas via intent=chat em vez de executar tools perigosas.\n\n"
+                    "DRAFT_PLAN_JSON:\n" + draft_json
+                ),
+            }
+        ]
+
+        revised = route_llm(settings, str(user_message or "").strip(), context_messages=ctx, registry=registry)
+        return revised
+    except Exception:
+        logger.exception("Plan critic falhou (best-effort)")
+        return None
+
+
+def _auto_profile_update_best_effort(
+    *,
+    console: Console,
+    settings: Settings,
+    registry,
+    profile_store: UserProfileStore,
+    memory: JsonlMemoryStore,
+    user_message: str,
+    assistant_response: str,
+) -> None:
+    """Extrai preferências estáveis e atualiza o perfil persistente (best-effort).
+
+    Política:
+    - Opt-in via OMNI_PROFILE_AUTO_UPDATE.
+    - Não inventa dados pessoais; só registra preferências explícitas do usuário.
+    - Executa SOMENTE memory.profile_update; qualquer outra tool é ignorada.
+    """
+
+    try:
+        um = str(user_message or "").strip()
+        ar = str(assistant_response or "").strip()
+        if not um or not ar:
+            return
+
+        # Evita ruído em interações curtíssimas.
+        if len(um) < 10:
+            return
+
+        existing = profile_store.load()
+        existing_json = json.dumps(existing, ensure_ascii=False)[:1800]
+
+        prompt = (
+            "INTERNAL: Atualize o PERFIL_DO_USUARIO (memória persistente). "
+            "Extraia APENAS preferências estáveis e explícitas (ex.: idioma, tom, nível de detalhe, nome que prefere). "
+            "NÃO invente fatos nem dados pessoais. "
+            "Se não houver nada útil, retorne tool_calls=[] e final_response=''. "
+            "Se houver, use APENAS memory.profile_update com args {patch} (object pequeno).\n\n"
+            f"PERFIL_ATUAL_JSON:\n{existing_json}"
+        )
+
+        ctx = [
+            {"role": "user", "content": um[:1200]},
+            {"role": "assistant", "content": ar[:1200]},
+        ]
+
+        plan = route_llm(settings, prompt, context_messages=ctx, registry=registry)
+        if plan is None or not plan.tool_calls:
+            return
+
+        calls = [c for c in plan.tool_calls if (c.tool_name or "").strip() == "memory.profile_update"]
+        if not calls:
+            return
+
+        call = calls[0]
+        res = registry.run("memory.profile_update", dict(call.args or {}))
+        memory.append(
+            "tool_output",
+            {
+                "tool": "memory.profile_update",
+                "args": dict(call.args or {}),
+                "attempt": 1,
+                "status": res.status,
+                "output": res.output,
+                "error": res.error,
+            },
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[dim]Auto-profile falhou (best-effort):[/dim] {exc}")
 
 
 def _is_side_effect_tool(name: str) -> bool:
@@ -756,9 +1046,23 @@ def _execute_plan(
     registry,
     plan: Plan,
     memory: JsonlMemoryStore,
+    approvals: ApprovalStore | None = None,
+    remember: bool = False,
     *,
     worker_mgr: WorkerManager | None = None,
 ) -> str | None:
+    # Per-run logging (local JSONL)
+    run = None
+    rl = None
+    if getattr(settings, "runlog_enabled", True):
+        try:
+            rl = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+            run = rl.start(intent=str(plan.intent or "run"))
+            rl.append(run, "plan", {"intent": plan.intent, "risk": str(plan.risk), "tool_calls": [c.model_dump() for c in plan.tool_calls]})
+        except Exception:
+            rl = None
+            run = None
+
     effective_risk = _effective_risk_for_plan(plan, registry, settings=settings)
     effective_plan = plan if effective_risk == plan.risk else plan.model_copy(update={"risk": effective_risk})
 
@@ -786,7 +1090,41 @@ def _execute_plan(
             },
         )
         console.print("Agente> Não executei por segurança.")
+        if rl is not None and run is not None:
+            try:
+                rl.append(run, "preflight_error", {"error": preflight_error})
+            except Exception:
+                pass
         return None
+
+    # Policy enforcement (before HITL)
+    if getattr(settings, "policy_enabled", True) and normalized_plan.tool_calls:
+        try:
+            eng = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
+            eng.load()
+            ok, decisions = eng.decide_plan(normalized_plan.tool_calls, plan_risk=normalized_plan.risk)
+            if not ok:
+                denied = [d for d in decisions if not d.allowed]
+                reason = denied[0].reason if denied else "policy denied"
+                console.print(Panel.fit(f"Policy bloqueou o plano.\nMotivo: {reason}", title="Policy"))
+                memory.append(
+                    "policy_denied",
+                    {
+                        "intent": normalized_plan.intent,
+                        "risk": str(normalized_plan.risk),
+                        "reason": reason,
+                        "decisions": [d.__dict__ for d in denied[:6]],
+                    },
+                )
+                if rl is not None and run is not None:
+                    try:
+                        rl.append(run, "policy_denied", {"reason": reason, "decisions": [d.__dict__ for d in denied]})
+                    except Exception:
+                        pass
+                return None
+        except Exception as exc:  # noqa: BLE001
+            # Fail-open: if policy cannot be evaluated, we don't block execution.
+            memory.append("policy_error", {"error": str(exc)})
 
     if effective_plan.risk != plan.risk:
         memory.append(
@@ -809,9 +1147,39 @@ def _execute_plan(
         enabled=settings.hitl_enabled,
         min_risk=settings.hitl_min_risk,
         require_token=settings.hitl_require_token,
+        remember=remember,
+        approvals=approvals,
     ):
         console.print("Agente> Ok, não vou executar isso.")
+        if rl is not None and run is not None:
+            try:
+                rl.append(run, "hitl_denied", {"intent": normalized_plan.intent, "risk": str(normalized_plan.risk)})
+            except Exception:
+                pass
         return None
+
+    # Snapshot automático (best-effort) após aprovação e antes de side-effects.
+    if (
+        getattr(settings, "snapshots_enabled", True)
+        and getattr(settings, "snapshots_auto_before_high_risk", True)
+        and normalized_plan.tool_calls
+        and normalized_plan.risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}
+    ):
+        try:
+            mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
+            info = mgr.create(label=str(normalized_plan.intent or "auto")[:40] or "auto")
+            console.print(Panel.fit(f"Snapshot criado: {info.snapshot_id}\nfiles={info.file_count}", title="Snapshot"))
+            memory.append(
+                "snapshot_created",
+                {"snapshot_id": info.snapshot_id, "zip_path": info.zip_path, "file_count": info.file_count, "intent": normalized_plan.intent},
+            )
+            if rl is not None and run is not None:
+                try:
+                    rl.append(run, "snapshot_created", {"snapshot_id": info.snapshot_id, "zip_path": info.zip_path, "file_count": info.file_count})
+                except Exception:
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Aviso:[/yellow] falha criando snapshot (best-effort): {exc}")
 
     # Se habilitado, manda algumas tools longas para background.
     long_running_tools = {
@@ -845,9 +1213,29 @@ def _execute_plan(
     # Execução sequencial (com retry opcional).
     for call in normalized_plan.tool_calls:
         result = _run_tool_with_retry(console, settings, registry, call, memory)
+        if rl is not None and run is not None:
+            try:
+                rl.append(
+                    run,
+                    "tool_result",
+                    {
+                        "tool": call.tool_name,
+                        "args": call.args,
+                        "status": result.status,
+                        "output": result.output,
+                        "error": result.error,
+                    },
+                )
+            except Exception:
+                pass
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
             console.print("Agente> Tive um erro executando o plano.")
+            if rl is not None and run is not None:
+                try:
+                    rl.append(run, "run_failed", {"tool": call.tool_name, "error": result.error})
+                except Exception:
+                    pass
             return None
 
         # Observabilidade do MVP:
@@ -862,14 +1250,34 @@ def _execute_plan(
     if normalized_plan.final_response:
         console.print(f"Agente> {normalized_plan.final_response}")
         memory.append("agent_response", {"text": normalized_plan.final_response})
+        if rl is not None and run is not None:
+            try:
+                rl.append(run, "final_response", {"text": normalized_plan.final_response})
+            except Exception:
+                pass
         return normalized_plan.final_response
     else:
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
+        if rl is not None and run is not None:
+            try:
+                rl.append(run, "final_response", {"text": "Feito."})
+            except Exception:
+                pass
         return "Feito."
 
 
-def _execute_plan_react(console: Console, settings: Settings, registry, plan: Plan, memory: JsonlMemoryStore, *, worker_mgr: WorkerManager | None = None) -> str | None:
+def _execute_plan_react(
+    console: Console,
+    settings: Settings,
+    registry,
+    plan: Plan,
+    memory: JsonlMemoryStore,
+    approvals: ApprovalStore | None = None,
+    remember: bool = False,
+    *,
+    worker_mgr: WorkerManager | None = None,
+) -> str | None:
     """Executa tools em loop, replanejando com base em tool outputs (ReAct-ish).
 
     Política:
@@ -877,7 +1285,22 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
     - Pede HITL em cada tool call (porque o plano pode mudar a cada passo).
     """
 
-    max_steps = 6
+    # Per-run logging (local JSONL)
+    run = None
+    rl = None
+    if getattr(settings, "runlog_enabled", True):
+        try:
+            rl = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+            run = rl.start(intent=str(plan.intent or "react"))
+            rl.append(run, "plan", {"intent": plan.intent, "risk": str(plan.risk), "tool_calls": [c.model_dump() for c in plan.tool_calls]})
+        except Exception:
+            rl = None
+            run = None
+
+    max_steps = int(getattr(settings, "autonomy_max_steps", 12) or 12) if getattr(settings, "autonomy_enabled", False) else 6
+    checkpoint_every = int(getattr(settings, "autonomy_checkpoint_every", 4) or 4)
+    if checkpoint_every < 1:
+        checkpoint_every = 1
     original_user_message = (plan.user_message or "").strip()
     current_plan = plan
 
@@ -910,20 +1333,86 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
         if preflight_error:
             console.print(f"[red]Preflight error:[/red] {preflight_error}")
             console.print("Agente> Não executei por segurança.")
+            if rl is not None and run is not None:
+                try:
+                    rl.append(run, "preflight_error", {"error": preflight_error, "step": step})
+                except Exception:
+                    pass
             return None
 
         console.print(Panel.fit(f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}", title="Plano"))
+
+        # Policy enforcement por passo (antes de HITL)
+        if getattr(settings, "policy_enabled", True):
+            try:
+                eng = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
+                eng.load()
+                ok, decisions = eng.decide_plan([call], plan_risk=normalized_plan.risk)
+                if not ok:
+                    denied = [d for d in decisions if not d.allowed]
+                    reason = denied[0].reason if denied else "policy denied"
+                    console.print(Panel.fit(f"Policy bloqueou a tool.\nMotivo: {reason}", title="Policy"))
+                    memory.append("policy_denied", {"tool": call.tool_name, "reason": reason, "step": step})
+                    if rl is not None and run is not None:
+                        try:
+                            rl.append(run, "policy_denied", {"tool": call.tool_name, "reason": reason, "step": step})
+                        except Exception:
+                            pass
+                    return None
+            except Exception as exc:  # noqa: BLE001
+                memory.append("policy_error", {"error": str(exc), "step": step})
 
         if not require_approval(
             normalized_plan,
             enabled=settings.hitl_enabled,
             min_risk=settings.hitl_min_risk,
             require_token=settings.hitl_require_token,
+            remember=remember,
+            approvals=approvals,
         ):
             console.print("Agente> Ok, não vou executar isso.")
+            if rl is not None and run is not None:
+                try:
+                    rl.append(run, "hitl_denied", {"tool": call.tool_name, "step": step})
+                except Exception:
+                    pass
             return None
 
+        # Snapshot automático por passo (best-effort)
+        if (
+            getattr(settings, "snapshots_enabled", True)
+            and getattr(settings, "snapshots_auto_before_high_risk", True)
+            and normalized_plan.risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}
+        ):
+            try:
+                mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
+                info = mgr.create(label=f"react_{call.tool_name}"[:40])
+                memory.append("snapshot_created", {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step})
+                if rl is not None and run is not None:
+                    try:
+                        rl.append(run, "snapshot_created", {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step})
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         result = _run_tool_with_retry(console, settings, registry, call, memory)
+        if rl is not None and run is not None:
+            try:
+                rl.append(
+                    run,
+                    "tool_result",
+                    {
+                        "tool": call.tool_name,
+                        "args": call.args,
+                        "status": result.status,
+                        "output": result.output,
+                        "error": result.error,
+                        "step": step,
+                    },
+                )
+            except Exception:
+                pass
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
 
@@ -962,6 +1451,19 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
         trace_messages.append({"role": "assistant", "content": "TOOL_RESULT " + json.dumps(trace, ensure_ascii=False)})
         if len(trace_messages) > 8:
             trace_messages = trace_messages[-8:]
+
+        # Checkpoint leve (autonomia): registra progresso e mostra status.
+        if getattr(settings, "autonomy_enabled", False) and checkpoint_every and (step % checkpoint_every == 0) and step < max_steps:
+            memory.append(
+                "autonomy_checkpoint",
+                {
+                    "step": step,
+                    "max_steps": max_steps,
+                    "last_tool": call.tool_name,
+                    "last_status": result.status,
+                },
+            )
+            console.print(Panel.fit(f"Checkpoint: step {step}/{max_steps}\nÚltima tool: {call.tool_name} ({result.status})", title="Autonomia"))
 
         # Se o plano original tinha mais tools, guardamos um hint para o LLM.
         if len(current_plan.tool_calls) > 1:

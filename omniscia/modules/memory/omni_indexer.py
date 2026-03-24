@@ -141,6 +141,7 @@ def index_paths_to_vector(
     paths: list[str],
     source: str = "omni-index",
     workspace_root: str | None = None,
+    max_file_mb: int = 4,
 ) -> tuple[int, int]:
     """Index paths into ChromaVectorMemory.
 
@@ -151,7 +152,7 @@ def index_paths_to_vector(
 
     seen = 0
     indexed = 0
-    for fp in iter_files_under(paths):
+    for fp in iter_files_under(paths, max_file_mb=max_file_mb):
         seen += 1
         try:
             abs_fp = fp.resolve()
