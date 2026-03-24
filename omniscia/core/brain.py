@@ -1261,6 +1261,7 @@ def _execute_plan(
             return text
 
     # Execução sequencial (com retry opcional).
+    saw_any_tool_output = False
     for call in normalized_plan.tool_calls:
         result = _run_tool_with_retry(console, settings, registry, call, memory)
         if rl is not None and run is not None:
@@ -1291,6 +1292,8 @@ def _execute_plan(
         # Observabilidade do MVP:
         # - Em agentes, tool output é parte essencial do feedback loop.
         # - Truncamos para não poluir o terminal nem expor dados demais por acidente.
+        if result.status == "ok" and bool((result.output or "").strip()):
+            saw_any_tool_output = True
         if getattr(settings, "ui_show_tool_outputs", True) and result.status == "ok" and result.output:
             out = result.output.strip()
             if len(out) > 2000:
@@ -1307,6 +1310,26 @@ def _execute_plan(
                 pass
         return normalized_plan.final_response
     else:
+        # Se o router produziu tools mas não produziu uma resposta final,
+        # tentamos gerar uma resposta útil em linguagem natural usando o chat LLM.
+        # Isso evita o UX ruim de responder apenas "Feito." para perguntas normais.
+        if normalized_plan.tool_calls and (not saw_any_tool_output):
+            try:
+                um = str((normalized_plan.user_message or "") or "").strip()
+                history = _build_chat_history(memory, current_user_message=um, vector_memory=None)
+                response_text = chat_reply(settings, um, history=history, image_path=None, profile_context=None)
+                response_text = str(response_text or "").strip() or "Feito."
+                console.print(f"Agente> {response_text}")
+                memory.append("agent_response", {"text": response_text})
+                if rl is not None and run is not None:
+                    try:
+                        rl.append(run, "final_response", {"text": response_text, "fallback": True})
+                    except Exception:
+                        pass
+                return response_text
+            except Exception:
+                logger.exception("Falha ao gerar resposta de fallback via chat LLM")
+
         console.print("Agente> Feito.")
         memory.append("agent_response", {"text": "Feito."})
         if rl is not None and run is not None:
