@@ -1,0 +1,2 @@
+# Keep Python sources consistent across platforms
+*.py text eol=lf
