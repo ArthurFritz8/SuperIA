@@ -747,3 +747,83 @@ def test_duck_image_route():
     assert plan.intent == "fun.duck_image"
     assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.duck_image"
     assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_datamuse_synonyms_route():
+    settings = Settings.load()
+    plan = route(settings, "sinônimos de rápido")
+    assert plan.intent == "language.datamuse_related_words"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "language.datamuse_related_words"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_scryfall_search_route():
+    settings = Settings.load()
+    plan = route(settings, "scryfall: lightning bolt")
+    assert plan.intent == "cards.scryfall_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "cards.scryfall_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_scryfall_random_route():
+    settings = Settings.load()
+    plan = route(settings, "mtg random")
+    assert plan.intent == "cards.scryfall_random"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "cards.scryfall_random"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_rickmorty_character_search_route():
+    settings = Settings.load()
+    plan = route(settings, "rickmorty: rick")
+    assert plan.intent == "media.rickmorty_character_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "media.rickmorty_character_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_sunrise_sunset_route():
+    settings = Settings.load()
+    plan = route(settings, "sunrise: -23.55, -46.63")
+    assert plan.intent == "time.sunrise_sunset"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "time.sunrise_sunset"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_dadjoke_route():
+    settings = Settings.load()
+    plan = route(settings, "dadjoke")
+    assert plan.intent == "fun.dadjoke"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.dadjoke"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_jokeapi_route():
+    settings = Settings.load()
+    plan = route(settings, "jokeapi")
+    assert plan.intent == "fun.jokeapi"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.jokeapi"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_ibge_states_route():
+    settings = Settings.load()
+    plan = route(settings, "ibge estados")
+    assert plan.intent == "br.ibge_states"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "br.ibge_states"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_ibge_municipalities_by_uf_route():
+    settings = Settings.load()
+    plan = route(settings, "ibge municipios: sp")
+    assert plan.intent == "br.ibge_municipalities_by_uf"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "br.ibge_municipalities_by_uf"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_viacep_lookup_route():
+    settings = Settings.load()
+    plan = route(settings, "cep: 01001-000")
+    assert plan.intent == "br.viacep_lookup"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "br.viacep_lookup"
+    assert plan.risk == RiskLevel.MEDIUM

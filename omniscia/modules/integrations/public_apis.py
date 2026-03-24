@@ -120,6 +120,18 @@ Mais APIs variadas (sem chave) — lote 4:
 - fun.bored_activity (Bored API — sugestão aleatória)
 - fun.fox_image (RandomFox — imagem aleatória)
 - fun.duck_image (RandomDuck — imagem aleatória)
+
+Mais APIs variadas (sem chave) — lote 5:
+- language.datamuse_related_words (Datamuse — palavras relacionadas/sinônimos)
+- cards.scryfall_search (Scryfall — busca cartas de Magic)
+- cards.scryfall_random (Scryfall — carta aleatória)
+- media.rickmorty_character_search (Rick and Morty API — busca personagens)
+- time.sunrise_sunset (Sunrise-Sunset — horários do sol por lat/lon)
+- fun.dadjoke (icanhazdadjoke — piada aleatória)
+- fun.jokeapi (JokeAPI — piada aleatória com safe-mode)
+- br.ibge_states (IBGE — lista de estados)
+- br.ibge_municipalities_by_uf (IBGE — municípios por UF)
+- br.viacep_lookup (ViaCEP — endereço por CEP)
 """
 
 from __future__ import annotations
@@ -303,6 +315,22 @@ _ALLOWED_HOSTS = {
     "randomfox.ca",
     # RandomDuck
     "random-d.uk",
+    # Datamuse
+    "api.datamuse.com",
+    # Scryfall (Magic: The Gathering)
+    "api.scryfall.com",
+    # Rick and Morty
+    "rickandmortyapi.com",
+    # Sunrise-Sunset
+    "api.sunrise-sunset.org",
+    # icanhazdadjoke
+    "icanhazdadjoke.com",
+    # JokeAPI
+    "v2.jokeapi.dev",
+    # IBGE
+    "servicodados.ibge.gov.br",
+    # ViaCEP
+    "viacep.com.br",
 }
 
 
@@ -1157,6 +1185,98 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Imagem aleatória de pato (RandomDuck). Args: (none)",
             risk="MEDIUM",
             fn=_duck_image,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="language.datamuse_related_words",
+            description=(
+                "Palavras relacionadas via Datamuse. Args: query, relation? (ml|rel_syn|rel_ant|rel_rhy, default ml), max_results? (default 10)"
+            ),
+            risk="MEDIUM",
+            fn=_datamuse_related_words,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="cards.scryfall_search",
+            description="Busca cartas no Scryfall (Magic). Args: query, limit? (default 5)",
+            risk="MEDIUM",
+            fn=_scryfall_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="cards.scryfall_random",
+            description="Carta aleatória no Scryfall (Magic). Args: (none)",
+            risk="MEDIUM",
+            fn=_scryfall_random,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="media.rickmorty_character_search",
+            description="Busca personagem de Rick and Morty. Args: query, limit? (default 5)",
+            risk="MEDIUM",
+            fn=_rickmorty_character_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="time.sunrise_sunset",
+            description="Horários de nascer/pôr do sol (UTC) via Sunrise-Sunset. Args: lat, lon, date? (YYYY-MM-DD)",
+            risk="MEDIUM",
+            fn=_sunrise_sunset,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.dadjoke",
+            description="Piada aleatória (dad joke) via icanhazdadjoke. Args: (none)",
+            risk="MEDIUM",
+            fn=_dadjoke,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.jokeapi",
+            description="Piada aleatória via JokeAPI (safe-mode). Args: category? (default Any)",
+            risk="MEDIUM",
+            fn=_jokeapi,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="br.ibge_states",
+            description="Lista estados do Brasil via IBGE. Args: (none)",
+            risk="MEDIUM",
+            fn=_ibge_states,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="br.ibge_municipalities_by_uf",
+            description="Lista municípios por UF via IBGE. Args: uf (ex: SP), limit? (default 20)",
+            risk="MEDIUM",
+            fn=_ibge_municipalities_by_uf,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="br.viacep_lookup",
+            description="Consulta endereço por CEP via ViaCEP. Args: cep (8 dígitos)",
+            risk="MEDIUM",
+            fn=_viacep_lookup,
         )
     )
 
@@ -4561,4 +4681,336 @@ def _duck_image(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error="resposta inesperada")
 
     out = {"message": data.get("message"), "image": data.get("url"), "source": "random-d.uk"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _datamuse_related_words(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    relation = str(args.get("relation", "ml") or "ml").strip()
+    if relation not in {"ml", "rel_syn", "rel_ant", "rel_rhy"}:
+        relation = "ml"
+
+    try:
+        max_results = int(args.get("max_results", 10) or 10)
+    except Exception:
+        max_results = 10
+    if max_results < 1:
+        max_results = 1
+    if max_results > 20:
+        max_results = 20
+
+    params: dict[str, Any] = {relation: query, "max": max_results}
+    data, err = _http_json(method="GET", url="https://api.datamuse.com/words", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, list):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    slim: list[dict[str, Any]] = []
+    for it in data[:max_results]:
+        if not isinstance(it, dict):
+            continue
+        slim.append({"word": it.get("word"), "score": it.get("score"), "tags": it.get("tags")})
+
+    out = {
+        "query": query,
+        "relation": relation,
+        "count": len(slim),
+        "results": slim,
+        "source": "api.datamuse.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _scryfall_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    params: dict[str, Any] = {"q": query, "unique": "cards", "order": "released"}
+    data, err = _http_json(method="GET", url="https://api.scryfall.com/cards/search", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    cards = data.get("data") if isinstance(data.get("data"), list) else []
+    slim: list[dict[str, Any]] = []
+    for c in cards[:limit]:
+        if not isinstance(c, dict):
+            continue
+        img = c.get("image_uris") if isinstance(c.get("image_uris"), dict) else {}
+        slim.append(
+            {
+                "name": c.get("name"),
+                "mana_cost": c.get("mana_cost"),
+                "type_line": c.get("type_line"),
+                "oracle_text": c.get("oracle_text"),
+                "set": c.get("set"),
+                "released_at": c.get("released_at"),
+                "scryfall_uri": c.get("scryfall_uri"),
+                "image": img.get("normal") or img.get("large") or img.get("small"),
+            }
+        )
+
+    out = {
+        "query": query,
+        "count": len(slim),
+        "results": slim,
+        "source": "api.scryfall.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _scryfall_random(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://api.scryfall.com/cards/random", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    img = data.get("image_uris") if isinstance(data.get("image_uris"), dict) else {}
+    out = {
+        "name": data.get("name"),
+        "mana_cost": data.get("mana_cost"),
+        "type_line": data.get("type_line"),
+        "oracle_text": data.get("oracle_text"),
+        "set": data.get("set"),
+        "released_at": data.get("released_at"),
+        "scryfall_uri": data.get("scryfall_uri"),
+        "image": img.get("normal") or img.get("large") or img.get("small"),
+        "source": "api.scryfall.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _rickmorty_character_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    data, err = _http_json(
+        method="GET",
+        url="https://rickandmortyapi.com/api/character/",
+        params={"name": query},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    slim: list[dict[str, Any]] = []
+    for c in results[:limit]:
+        if not isinstance(c, dict):
+            continue
+        origin = c.get("origin") if isinstance(c.get("origin"), dict) else {}
+        location = c.get("location") if isinstance(c.get("location"), dict) else {}
+        slim.append(
+            {
+                "id": c.get("id"),
+                "name": c.get("name"),
+                "status": c.get("status"),
+                "species": c.get("species"),
+                "type": c.get("type"),
+                "gender": c.get("gender"),
+                "origin": origin.get("name"),
+                "location": location.get("name"),
+                "image": c.get("image"),
+                "url": c.get("url"),
+            }
+        )
+
+    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    out = {
+        "query": query,
+        "count": len(slim),
+        "total": info.get("count"),
+        "results": slim,
+        "source": "rickandmortyapi.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _sunrise_sunset(args: dict[str, Any]) -> ToolResult:
+    try:
+        lat = float(str(args.get("lat")).replace(",", "."))
+        lon = float(str(args.get("lon")).replace(",", "."))
+    except Exception:
+        return ToolResult(status="error", error="informe lat e lon (números)")
+
+    date = str(args.get("date", "") or "").strip()
+    if date and not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        return ToolResult(status="error", error="date deve ser YYYY-MM-DD")
+    if not date:
+        date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    params: dict[str, Any] = {"lat": lat, "lng": lon, "date": date, "formatted": 0}
+    data, err = _http_json(method="GET", url="https://api.sunrise-sunset.org/json", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    results = data.get("results") if isinstance(data.get("results"), dict) else {}
+    out = {
+        "lat": lat,
+        "lon": lon,
+        "date": date,
+        "timezone": "UTC",
+        "sunrise": results.get("sunrise"),
+        "sunset": results.get("sunset"),
+        "solar_noon": results.get("solar_noon"),
+        "day_length": results.get("day_length"),
+        "civil_twilight_begin": results.get("civil_twilight_begin"),
+        "civil_twilight_end": results.get("civil_twilight_end"),
+        "status": data.get("status"),
+        "source": "api.sunrise-sunset.org",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _dadjoke(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(
+        method="GET",
+        url="https://icanhazdadjoke.com/",
+        headers={"Accept": "application/json"},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {"id": data.get("id"), "joke": data.get("joke"), "source": "icanhazdadjoke.com"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _jokeapi(args: dict[str, Any]) -> ToolResult:
+    category = str(args.get("category", "Any") or "Any").strip()
+    if not re.fullmatch(r"[A-Za-z,]{2,60}", category):
+        category = "Any"
+
+    params: dict[str, Any] = {
+        "type": "single",
+        "safe-mode": "",
+        "blacklistFlags": "nsfw,religious,political,racist,sexist,explicit",
+    }
+    data, err = _http_json(method="GET", url=f"https://v2.jokeapi.dev/joke/{category}", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+    if data.get("error") is True:
+        return ToolResult(status="error", error=str(data.get("message") or "erro")[:200])
+
+    out = {
+        "category": data.get("category"),
+        "joke": data.get("joke"),
+        "lang": data.get("lang"),
+        "safe": data.get("safe"),
+        "source": "v2.jokeapi.dev",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _ibge_states(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://servicodados.ibge.gov.br/api/v1/localidades/estados", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, list):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    slim: list[dict[str, Any]] = []
+    for s in data:
+        if not isinstance(s, dict):
+            continue
+        reg = s.get("regiao") if isinstance(s.get("regiao"), dict) else {}
+        slim.append({"id": s.get("id"), "sigla": s.get("sigla"), "nome": s.get("nome"), "regiao": reg.get("nome")})
+
+    slim.sort(key=lambda x: (str(x.get("sigla") or "")))
+    out = {"count": len(slim), "states": slim, "source": "servicodados.ibge.gov.br"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _ibge_municipalities_by_uf(args: dict[str, Any]) -> ToolResult:
+    uf = str(args.get("uf", "") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{2}", uf):
+        return ToolResult(status="error", error="informe uf (ex: SP)")
+
+    try:
+        limit = int(args.get("limit", 20) or 20)
+    except Exception:
+        limit = 20
+    if limit < 1:
+        limit = 1
+    if limit > 50:
+        limit = 50
+
+    url = f"https://servicodados.ibge.gov.br/api/v1/localidades/estados/{uf}/municipios"
+    data, err = _http_json(method="GET", url=url, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, list):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    slim: list[dict[str, Any]] = []
+    for m in data[:limit]:
+        if not isinstance(m, dict):
+            continue
+        slim.append({"id": m.get("id"), "nome": m.get("nome")})
+
+    out = {"uf": uf, "count": len(slim), "municipalities": slim, "source": "servicodados.ibge.gov.br"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _viacep_lookup(args: dict[str, Any]) -> ToolResult:
+    cep = str(args.get("cep", "") or "").strip()
+    cep_digits = re.sub(r"\D+", "", cep)
+    if not re.fullmatch(r"\d{8}", cep_digits):
+        return ToolResult(status="error", error="informe cep com 8 dígitos (ex: 01001000)")
+
+    data, err = _http_json(method="GET", url=f"https://viacep.com.br/ws/{cep_digits}/json/", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+    if data.get("erro") is True:
+        return ToolResult(status="error", error="CEP não encontrado")
+
+    out = {
+        "cep": data.get("cep") or cep_digits,
+        "logradouro": data.get("logradouro"),
+        "complemento": data.get("complemento"),
+        "bairro": data.get("bairro"),
+        "localidade": data.get("localidade"),
+        "uf": data.get("uf"),
+        "ibge": data.get("ibge"),
+        "gia": data.get("gia"),
+        "ddd": data.get("ddd"),
+        "siafi": data.get("siafi"),
+        "source": "viacep.com.br",
+    }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))

@@ -186,6 +186,16 @@ def route(settings: Settings, user_message: str) -> Plan:
         "fun.bored_activity",
         "fun.fox_image",
         "fun.duck_image",
+        "language.datamuse_related_words",
+        "cards.scryfall_search",
+        "cards.scryfall_random",
+        "media.rickmorty_character_search",
+        "time.sunrise_sunset",
+        "fun.dadjoke",
+        "fun.jokeapi",
+        "br.ibge_states",
+        "br.ibge_municipalities_by_uf",
+        "br.viacep_lookup",
         "win.focus_window",
         "discord.send_message",
         "jgrasp.create_java_program",
@@ -1481,6 +1491,136 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="books.googlebooks_search", args={"query": q, "limit": 5})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou buscar livros no Google Books.",
+        )
+
+    # Regra: Datamuse (sinônimos) — explícito
+    # Exemplos: "sinônimos de rápido", "datamuse: latency"
+    m = re.search(r"\b(sinonimos|sinônimos)\b\s+de\s+([\w\-]{2,60})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="language.datamuse_related_words",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="language.datamuse_related_words", args={"query": q, "relation": "rel_syn", "max_results": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar sinônimos/relacionados (Datamuse).",
+        )
+
+    m = re.search(r"\bdatamuse\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="language.datamuse_related_words",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="language.datamuse_related_words", args={"query": q, "relation": "ml", "max_results": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar palavras relacionadas (Datamuse).",
+        )
+
+    # Regra: Scryfall (Magic) — explícito
+    if re.search(r"\b(scryfall|mtg)\b", norm) and re.search(r"\b(random|aleatoria|aleatória)\b", norm):
+        return Plan(
+            intent="cards.scryfall_random",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="cards.scryfall_random", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma carta aleatória (Scryfall).",
+        )
+
+    m = re.search(r"\b(scryfall|mtg)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="cards.scryfall_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="cards.scryfall_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar cartas (Scryfall).",
+        )
+
+    # Regra: Rick and Morty — explícito
+    m = re.search(r"\b(rick\s*&\s*morty|rick\s+and\s+morty|rickmorty)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="media.rickmorty_character_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="media.rickmorty_character_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar personagens de Rick and Morty.",
+        )
+
+    # Regra: Sunrise/Sunset — explícito
+    # Exemplos: "sunrise: -23.55, -46.63", "nascer do sol: -23.55 -46.63"
+    m = re.search(r"\b(sunrise|sunset|nascer\s+do\s+sol|por\s+do\s+sol)\b\s*[:\-]\s*(-?\d+(?:[\.,]\d+)?)\s*[,\s]+\s*(-?\d+(?:[\.,]\d+)?)\b", msg, flags=re.IGNORECASE)
+    if m:
+        lat_s = (m.group(2) or "").replace(",", ".")
+        lon_s = (m.group(3) or "").replace(",", ".")
+        try:
+            lat = float(lat_s)
+            lon = float(lon_s)
+        except Exception:
+            lat = None
+            lon = None
+        if lat is not None and lon is not None:
+            return Plan(
+                intent="time.sunrise_sunset",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="time.sunrise_sunset", args={"lat": lat, "lon": lon})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar horários de nascer/pôr do sol (UTC).",
+            )
+
+    # Regra: DadJoke / JokeAPI — explícito
+    if re.search(r"\bdadjoke\b", norm):
+        return Plan(
+            intent="fun.dadjoke",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.dadjoke", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma dad joke aleatória.",
+        )
+
+    if re.search(r"\bjokeapi\b", norm):
+        return Plan(
+            intent="fun.jokeapi",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.jokeapi", args={"category": "Any"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma piada aleatória (safe-mode).",
+        )
+
+    # Regra: IBGE — explícito
+    if re.search(r"\bibge\b", norm) and re.search(r"\b(estados|ufs)\b", norm):
+        return Plan(
+            intent="br.ibge_states",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="br.ibge_states", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou listar os estados (IBGE).",
+        )
+
+    m = re.search(r"\bibge\b\s+(?:municipios|munic[ií]pios)\b\s*[:\-]\s*([A-Za-z]{2})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        uf = (m.group(1) or "").strip().upper()
+        return Plan(
+            intent="br.ibge_municipalities_by_uf",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="br.ibge_municipalities_by_uf", args={"uf": uf, "limit": 20})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou listar municípios por UF (IBGE).",
+        )
+
+    # Regra: ViaCEP — explícito
+    m = re.search(r"\b(cep|viacep)\b\s*[:\-]?\s*(\d{5}-?\d{3})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        cep = (m.group(2) or "").strip()
+        return Plan(
+            intent="br.viacep_lookup",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="br.viacep_lookup", args={"cep": cep})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o endereço pelo CEP (ViaCEP).",
         )
 
     # Regra: Gutendex / Gutenberg — explícito
