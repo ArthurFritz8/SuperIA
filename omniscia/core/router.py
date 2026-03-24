@@ -19,9 +19,173 @@ from datetime import datetime
 from typing import Any
 
 from omniscia.core.config import Settings
+from omniscia.core.tools import ToolRegistry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 
 logger = logging.getLogger(__name__)
+
+
+_DETERMINISTIC_INTENTS: set[str] = {
+    # OS openers
+    "os.open_url",
+    "os.open_explorer",
+    "os.open_app",
+    "os.close_app",
+    "os.scan_apps",
+    "os.generate_open_apps",
+    "os.mkdir",
+    # Filesystem routines
+    "fs.list_dir",
+    "fs.read_text",
+    "fs.delete",
+    "fs.mkdir",
+    "fs.copy",
+    "fs.move",
+    # Vision basics
+    "screen.screenshot",
+    "screen.ocr",
+    # Router intents for vision
+    "vision.screenshot",
+    "vision.ocr",
+    # GUI explicit coordinates
+    "gui.get_mouse",
+    "gui.move_mouse",
+    "gui.click",
+    "gui.click_box_center",
+    "gui.type_text",
+    "gui.press_key",
+    # Games
+    "game.trex_autoplay",
+    "game.autoplay",
+    "game.list_profiles",
+    "game.save_profile",
+    "game.calibrate_runner_from_mouse",
+    # Education
+    "edu.pdf_word_autofill",
+    # Web read-only
+    "web.get_page_text",
+    # Public API integrations (read-only)
+    "data.weather",
+    "finance.crypto_price",
+    "knowledge.wikipedia_summary",
+    "papers.arxiv_search",
+    "web.search",
+    "geo.geocode",
+    "geo.reverse_geocode",
+    "geo.route_osrm",
+    "finance.fx_convert",
+    "data.country_info",
+    "time.world_time",
+    "news.gdelt_search",
+    "books.openlibrary_search",
+    "calendar.holidays",
+    "papers.crossref_search",
+    "finance.fear_greed_index",
+    "science.earthquake_usgs",
+    "space.iss_position",
+    "health.covid_stats",
+    "knowledge.openalex_works_search",
+    "knowledge.wikidata_search",
+    "knowledge.wikidata_entity",
+    "data.worldbank_indicator",
+    "news.hackernews_front_page",
+    "code.github_repo_search",
+    "qa.stackexchange_search",
+    "language.dictionary_define",
+    "media.lyrics",
+    "fun.joke",
+    "fun.trivia",
+    "fun.pokemon_info",
+    "net.ip_info",
+    "people.random_user",
+    "fun.cat_fact",
+    "utils.qr_code_url",
+    "sec.osv_vuln",
+    "sec.osv_query",
+    "pkg.pypi_project",
+    "pkg.npm_package",
+    "pkg.cratesio_crate",
+    "net.dns_google_resolve",
+    "status.github",
+    "net.rdap_domain",
+    "net.rdap_ip",
+    "net.bgpview_ip",
+    "net.bgpview_asn",
+    "sec.crtsh_search",
+    "sec.cisa_kev_search",
+    "status.cloudflare",
+    "status.discord",
+    "net.ripestat_ip",
+    "net.ripestat_asn",
+    "net.peeringdb_asn",
+    "sec.urlhaus_url",
+    "sec.urlhaus_host",
+    "sec.threatfox_ioc_search",
+    "status.npm",
+    "status.openai",
+    "status.docker",
+    "sec.feodotracker_ip_blocklist",
+    "sec.hashlookup",
+    "status.atlassian",
+    "status.zoom",
+    "status.gitlab",
+    "space.spacex_latest_launch",
+    "archive.archiveorg_search",
+    "media.tvmaze_search",
+    "food.meal_search",
+    "edu.universities_search",
+    "people.agify_name",
+    "people.genderize_name",
+    "people.nationalize_name",
+    "fun.dog_image",
+    "anime.jikan_search",
+    "art.met_search",
+    "art.met_object",
+    "art.artic_search",
+    "chess.chesscom_player",
+    "chess.chesscom_stats",
+    "chess.chesscom_daily_puzzle",
+    "drink.openbrewerydb_search",
+    "fun.deck_draw",
+    "fun.xkcd_latest",
+    "fun.xkcd_comic",
+    "music.itunes_search",
+    "books.gutendex_search",
+    "data.openfoodfacts_search",
+    "pkg.npm_downloads_last_week",
+    "books.googlebooks_search",
+    "fun.quote_random",
+    "fun.advice",
+    "fun.bored_activity",
+    "fun.fox_image",
+    "fun.duck_image",
+    "language.datamuse_related_words",
+    "cards.scryfall_search",
+    "cards.scryfall_random",
+    "media.rickmorty_character_search",
+    "time.sunrise_sunset",
+    "fun.dadjoke",
+    "fun.jokeapi",
+    "br.ibge_states",
+    "br.ibge_municipalities_by_uf",
+    "br.viacep_lookup",
+    "win.focus_window",
+    "discord.send_message",
+    "jgrasp.create_java_program",
+    "jgrasp.write_code",
+    # DevAgent (explicit)
+    "dev.exec",
+    "dev.run_python",
+    "dev.autofix_python_file",
+    "dev.autofix_cmd",
+    "dev.scaffold_project",
+    # Session toggles
+    "core.omega_on",
+    "core.omega_off",
+    "core.voice_on",
+    "core.voice_off",
+    "core.help",
+}
 
 
 def _normalize(text: str) -> str:
@@ -52,172 +216,64 @@ def route(settings: Settings, user_message: str) -> Plan:
     # Prefer deterministic heuristics whenever they match.
     # This improves UX (no latency/quota) and avoids LLM hallucinations.
     heuristic = _route_heuristic(user_message)
-    deterministic_intents = {
-        # OS openers
-        "os.open_url",
-        "os.open_explorer",
-        "os.open_app",
-        "os.close_app",
-        "os.scan_apps",
-        "os.generate_open_apps",
-        "os.mkdir",
-        # Filesystem routines
-        "fs.list_dir",
-        "fs.read_text",
-        "fs.delete",
-        "fs.mkdir",
-        "fs.copy",
-        "fs.move",
-        # Vision basics
-        "screen.screenshot",
-        "screen.ocr",
-        # Router intents for vision
-        "vision.screenshot",
-        "vision.ocr",
-        # GUI explicit coordinates
-        "gui.get_mouse",
-        "gui.move_mouse",
-        "gui.click",
-        "gui.click_box_center",
-        "gui.type_text",
-        "gui.press_key",
-        # Games
-        "game.trex_autoplay",
-        "game.autoplay",
-        "game.list_profiles",
-        "game.save_profile",
-        "game.calibrate_runner_from_mouse",
-        # Education
-        "edu.pdf_word_autofill",
-        # Web read-only
-        "web.get_page_text",
-        # Public API integrations (read-only)
-        "data.weather",
-        "finance.crypto_price",
-        "knowledge.wikipedia_summary",
-        "papers.arxiv_search",
-        "web.search",
-        "geo.geocode",
-        "geo.reverse_geocode",
-        "geo.route_osrm",
-        "finance.fx_convert",
-        "data.country_info",
-        "time.world_time",
-        "news.gdelt_search",
-        "books.openlibrary_search",
-        "calendar.holidays",
-        "papers.crossref_search",
-        "finance.fear_greed_index",
-        "science.earthquake_usgs",
-        "space.iss_position",
-        "health.covid_stats",
-        "knowledge.openalex_works_search",
-        "knowledge.wikidata_search",
-        "knowledge.wikidata_entity",
-        "data.worldbank_indicator",
-        "news.hackernews_front_page",
-        "code.github_repo_search",
-        "qa.stackexchange_search",
-        "language.dictionary_define",
-        "media.lyrics",
-        "fun.joke",
-        "fun.trivia",
-        "fun.pokemon_info",
-        "net.ip_info",
-        "people.random_user",
-        "fun.cat_fact",
-        "utils.qr_code_url",
-        "sec.osv_vuln",
-        "sec.osv_query",
-        "pkg.pypi_project",
-        "pkg.npm_package",
-        "pkg.cratesio_crate",
-        "net.dns_google_resolve",
-        "status.github",
-        "net.rdap_domain",
-        "net.rdap_ip",
-        "net.bgpview_ip",
-        "net.bgpview_asn",
-        "sec.crtsh_search",
-        "sec.cisa_kev_search",
-        "status.cloudflare",
-        "status.discord",
-        "net.ripestat_ip",
-        "net.ripestat_asn",
-        "net.peeringdb_asn",
-        "sec.urlhaus_url",
-        "sec.urlhaus_host",
-        "sec.threatfox_ioc_search",
-        "status.npm",
-        "status.openai",
-        "status.docker",
-        "sec.feodotracker_ip_blocklist",
-        "sec.hashlookup",
-        "status.atlassian",
-        "status.zoom",
-        "status.gitlab",
-        "space.spacex_latest_launch",
-        "archive.archiveorg_search",
-        "media.tvmaze_search",
-        "food.meal_search",
-        "edu.universities_search",
-        "people.agify_name",
-        "people.genderize_name",
-        "people.nationalize_name",
-        "fun.dog_image",
-        "anime.jikan_search",
-        "art.met_search",
-        "art.met_object",
-        "art.artic_search",
-        "chess.chesscom_player",
-        "chess.chesscom_stats",
-        "chess.chesscom_daily_puzzle",
-        "drink.openbrewerydb_search",
-        "fun.deck_draw",
-        "fun.xkcd_latest",
-        "fun.xkcd_comic",
-        "music.itunes_search",
-        "books.gutendex_search",
-        "data.openfoodfacts_search",
-        "pkg.npm_downloads_last_week",
-        "books.googlebooks_search",
-        "fun.quote_random",
-        "fun.advice",
-        "fun.bored_activity",
-        "fun.fox_image",
-        "fun.duck_image",
-        "language.datamuse_related_words",
-        "cards.scryfall_search",
-        "cards.scryfall_random",
-        "media.rickmorty_character_search",
-        "time.sunrise_sunset",
-        "fun.dadjoke",
-        "fun.jokeapi",
-        "br.ibge_states",
-        "br.ibge_municipalities_by_uf",
-        "br.viacep_lookup",
-        "win.focus_window",
-        "discord.send_message",
-        "jgrasp.create_java_program",
-        "jgrasp.write_code",
-        # DevAgent (explicit)
-        "dev.exec",
-        "dev.run_python",
-        "dev.autofix_python_file",
-        "dev.autofix_cmd",
-        "dev.scaffold_project",
-        # Session toggles
-        "core.omega_on",
-        "core.omega_off",
-        "core.voice_on",
-        "core.voice_off",
-        "core.help",
-    }
-    if heuristic.intent in deterministic_intents:
+    if heuristic.intent in _DETERMINISTIC_INTENTS:
         return heuristic
 
     if settings.router_mode == "llm":
         plan = route_llm(settings, user_message, heuristic_fallback=heuristic)
+        if plan is not None:
+            return plan
+
+    return heuristic
+
+
+def route_with_registry(settings: Settings, user_message: str, *, registry: ToolRegistry) -> Plan:
+    """Como `route()`, mas com conhecimento das tools registradas.
+
+    Benefícios:
+    - O router LLM só vê tools realmente disponíveis (melhor qualidade/menos falhas).
+    - Podemos falhar cedo quando uma heuristic seleciona tool ausente (deps opcionais).
+
+    Observação:
+    - Mantemos `route()` intacta para compatibilidade em testes/uso externo.
+    """
+
+    # Exit must be handled deterministically before any LLM routing.
+    if _normalize(user_message) in {"sair", "exit", "quit"}:
+        msg = user_message.strip()
+        return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
+
+    heuristic = _route_heuristic(user_message)
+
+    # Se a heuristic escolheu tools que não existem neste runtime, devolvemos orientação.
+    # (isso acontece quando dependências opcionais não foram instaladas)
+    if heuristic.tool_calls:
+        missing: list[str] = []
+        for c in heuristic.tool_calls:
+            try:
+                registry.get((c.tool_name or "").strip())
+            except Exception:
+                missing.append((c.tool_name or "").strip() or "(vazio)")
+        if missing:
+            return Plan(
+                intent="chat",
+                user_message=user_message.strip(),
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response=(
+                    "Essa automação depende de tools que não estão disponíveis nesta instalação: "
+                    + ", ".join(sorted(set(missing)))
+                    + ".\n"
+                    + "Rode: omniscia doctor\n"
+                    + "e instale os extras sugeridos (ex.: pip install -e .[all])."
+                ),
+            )
+
+    if heuristic.intent in _DETERMINISTIC_INTENTS:
+        return heuristic
+
+    if settings.router_mode == "llm":
+        plan = route_llm(settings, user_message, heuristic_fallback=heuristic, registry=registry)
         if plan is not None:
             return plan
 
@@ -230,6 +286,7 @@ def route_llm(
     *,
     context_messages: list[dict[str, str]] | None = None,
     heuristic_fallback: Plan | None = None,
+    registry: ToolRegistry | None = None,
 ) -> Plan | None:
     """Roteia via LLM (quando configurado), opcionalmente com contexto adicional.
 
@@ -242,9 +299,14 @@ def route_llm(
     - Guardrails de segurança são aplicados aqui.
     """
 
+    llm_kwargs: dict[str, Any] = {}
+    if registry is not None:
+        llm_kwargs["registry"] = registry
+
     plan = _route_with_llm_messages(
         settings,
         (context_messages or []) + [{"role": "user", "content": str(user_message or "").strip()}],
+        **llm_kwargs,
     )
     if plan is None:
         return None
@@ -303,6 +365,7 @@ def route_llm(
         plan2 = _route_with_llm_messages(
             settings,
             (context_messages or []) + [{"role": "user", "content": no_tools_msg}],
+            **llm_kwargs,
         )
         if plan2 is not None and not _has_forbidden_tools(plan2) and (plan2.final_response or "").strip():
             plan = plan2
@@ -2721,7 +2784,12 @@ def _route_with_llm(settings: Settings, user_message: str) -> Plan | None:
     return _route_with_llm_messages(settings, [{"role": "user", "content": str(user_message or "").strip()}])
 
 
-def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]]) -> Plan | None:
+def _route_with_llm_messages(
+    settings: Settings,
+    messages: list[dict[str, str]],
+    *,
+    registry: ToolRegistry | None = None,
+) -> Plan | None:
     """Usa LLM para produzir um Plan em JSON, aceitando histórico curto.
 
     `messages` deve ser uma lista no formato OpenAI: {role, content}.
@@ -2742,44 +2810,76 @@ def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]])
         logger.exception("litellm não disponível; caindo no heurístico")
         return None
 
-    system = (
-        "Você é um roteador de ferramentas para um agente autônomo. "
-        "Sua tarefa é transformar a intenção do usuário em um JSON de plano. "
-        "Responda APENAS com JSON válido (sem markdown, sem texto extra).\n\n"
-        "FORMATO:\n"
-        "{\n"
-        "  \"intent\": string,\n"
-        "  \"user_message\": string,\n"
-        "  \"risk\": \"LOW\"|\"MEDIUM\"|\"HIGH\"|\"CRITICAL\",\n"
-        "  \"tool_calls\": [ { \"tool_name\": string, \"args\": object } ],\n"
-        "  \"final_response\": string\n"
-        "}\n\n"
-        "REGRAS DE RISCO:\n"
-        "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
-        "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
-        "CONTEXTO (IMPORTANTE):\n"
-        "- Você pode receber mensagens anteriores com resultados de tools (ex.: 'TOOL_RESULT ...'). Use isso para decidir próximos passos.\n\n"
-        "REGRA MAIS IMPORTANTE (NÃO INVENTE AUTOMAÇÃO):\n"
-        "- Se o usuário pediu apenas orientação/explicação/dicas (ex: jogos, estudo, dúvidas), responda em texto: tool_calls=[] e risk=LOW.\n"
-        "- Só use tools de tela (screen.*), janela (win.focus_window) ou GUI (gui.* / screen.click_text) quando o usuário pedir explicitamente para ver/clicar/digitar na tela.\n"
-        "- Só use dev.* quando o usuário pedir explicitamente para executar/rodar comandos ou código.\n"
-        "- Nunca adivinhe window_title: só preencha window_title se o usuário fornecer o texto do título (ou substring) na mensagem.\n\n"
-        "REGRAS ESPECÍFICAS:\n"
-        "- Se usar discord.send_message, inclua antes um os.open_app com app='discord' para garantir que o Discord esteja aberto/em foco.\n\n"
-        "- jGRASP (MUITO IMPORTANTE):\n"
-        "  - Se o usuário pedir um programa/código Java 'funcional', 'completo', 'de matriz', 'de matemática', etc., use jgrasp.create_java_program OU jgrasp.write_code com o campo code (NÃO use apenas message).\n"
-        "  - O campo code deve conter Java compilável, sem markdown e sem cercas de código (```), e a classe pública deve bater com class_name.\n"
-        "  - Defaults: path='scratch/<ClassName>.java' e class_name='<ClassName>' (PascalCase).\n"
-        "  - Só use path com prefixo 'desktop:/' quando o usuário pedir explicitamente 'Área de Trabalho/desktop'.\n"
-        "  - Se o usuário disser que o jGRASP já está aberto e/ou que não precisa criar arquivo, prefira jgrasp.write_code com select_all=true (substitui o editor atual).\n"
-        "  - Se houver TOOL_RESULT indicando falha por foco/timing, ajuste settle_ms para mais alto (ex.: 1200) e garanta os.open_app('jgrasp') antes.\n\n"
-        "- Self-coding (opt-in):\n"
-        "  - Se NÃO existir uma tool adequada e o usuário pedir para 'criar uma ferramenta' ou 'criar um script', você pode propor self-coding.\n"
-        "  - Faça isso SOMENTE como plano explícito e seguro: (1) write_file em scratch/<nome>.py, (2) dev.run_python com script='scratch/<nome>.py'.\n"
-        "  - Alternativa (preferida para plugins): use dev.create_tool para criar um módulo em omniscia/tools/custom e recarregar tools no runtime.\n"
-        "  - Marque risk=CRITICAL e descreva claramente o que o script faz.\n"
-        "  - Nunca escreva scripts fora de scratch/.\n\n"
-        "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
+    def _build_registered_tools_catalog(r: ToolRegistry) -> str:
+        # Catálogo compacto (name-only) para não explodir o prompt.
+        # As ferramentas mais importantes têm args explicitados em SCHEMAS.
+        names = sorted({(s.name or "").strip() for s in r.list() if (s.name or "").strip()})
+        max_tools = 180
+        shown = names[:max_tools]
+        rest = max(0, len(names) - len(shown))
+
+        lines = [f"- {n}" for n in shown]
+        if rest:
+            lines.append(f"... (+{rest} tools não listadas por limite de prompt; se precisar, use core.list_tools)")
+        return "\n".join(lines)
+
+    def _build_schema_hints(r: ToolRegistry) -> str:
+        # Hints curtos para tools comuns/complexas.
+        # Só incluímos as que existem no runtime para evitar planos inválidos.
+        hints: dict[str, str] = {
+            "core.show_settings": "- core.show_settings -> {}",
+            "core.list_tools": "- core.list_tools -> {}",
+            "core.help": "- core.help -> {}",
+            "echo": "- echo -> {text}",
+            "write_file": "- write_file -> {path, content}",
+            "os.open_url": "- os.open_url -> {url} (http/https)",
+            "os.open_explorer": "- os.open_explorer -> {path?} (path relativo; default '.')",
+            "os.open_app": "- os.open_app -> {app} (allowlist via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON)",
+            "os.close_app": "- os.close_app -> {app? , title_contains? , timeout_s?}",
+            "os.mkdir": "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)",
+            "fs.list_dir": "- fs.list_dir -> {path}",
+            "fs.read_text": "- fs.read_text -> {path, max_chars?}",
+            "fs.mkdir": "- fs.mkdir -> {path}",
+            "fs.copy": "- fs.copy -> {src, dst, overwrite?}",
+            "fs.move": "- fs.move -> {src, dst, overwrite?}",
+            "fs.delete": "- fs.delete -> {path} (CRITICAL)",
+            "screen.screenshot": "- screen.screenshot -> {}",
+            "screen.ocr": "- screen.ocr -> {path?}",
+            "screen.find_text": "- screen.find_text -> {query, path?, window_title?, max_results?, min_conf?}",
+            "screen.click_text": "- screen.click_text -> {query, path?, window_title?, min_conf?} (CRITICAL)",
+            "gui.get_mouse": "- gui.get_mouse -> {}",
+            "gui.move_mouse": "- gui.move_mouse -> {x, y}",
+            "gui.click": "- gui.click -> {x, y} (CRITICAL)",
+            "gui.click_box_center": "- gui.click_box_center -> {x, y, w, h} (CRITICAL)",
+            "gui.type_text": "- gui.type_text -> {text} (CRITICAL)",
+            "win.focus_window": "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows)",
+            "web.get_page_text": "- web.get_page_text -> {url, max_chars?}",
+            "web.screenshot": "- web.screenshot -> {url, path?}",
+            "web.get_links": "- web.get_links -> {url, max_links?}",
+            "dev.exec": "- dev.exec -> {command, timeout_s?}",
+            "dev.run_python": "- dev.run_python -> {code|module|script, timeout_s?}",
+            "dev.create_tool": "- dev.create_tool -> {name, code, overwrite?} (CRITICAL; requer opt-in)",
+            "dev.autofix_python_file": "- dev.autofix_python_file -> {path, max_iters?, timeout_s?}",
+            "dev.autofix_cmd": "- dev.autofix_cmd -> {command, max_iters?, timeout_s?} (apenas pytest)",
+            "discord.send_message": "- discord.send_message -> {to, message, settle_ms?} (CRITICAL)",
+            "jgrasp.create_java_program": "- jgrasp.create_java_program -> {path?, class_name?, message?, code?, open_in_jgrasp?, settle_ms?} (HIGH)",
+            "jgrasp.write_code": "- jgrasp.write_code -> {code, settle_ms?, select_all?} (HIGH)",
+            "memory.search": "- memory.search -> {query, limit?}",
+            "memory.remember": "- memory.remember -> {text, topic?, tags?}",
+            "memory.search_vector": "- memory.search_vector -> {query, limit?} (se disponível)",
+            "memory.index_recent": "- memory.index_recent -> {limit?} (se disponível)",
+        }
+
+        present: list[str] = []
+        for name in sorted(hints.keys()):
+            try:
+                r.get(name)
+            except Exception:
+                continue
+            present.append(hints[name])
+        return "\n".join(present)
+
+    static_tools_block = (
         "- core.show_settings -> {}\n"
         "- core.list_tools -> {}\n"
         "- echo -> {text}\n"
@@ -2821,6 +2921,63 @@ def _route_with_llm_messages(settings: Settings, messages: list[dict[str, str]])
         "- dev.create_tool -> {name, code, overwrite?} (CRITICAL; cria tool custom e hot-reload; requer opt-in)\n"
         "- dev.autofix_python_file -> {path, max_iters, timeout_s}\n"
         "- dev.autofix_cmd -> {command, max_iters, timeout_s} (apenas pytest)\\n"
+    )
+
+    tools_block = ""
+    schemas_block = ""
+    if registry is not None:
+        tools_block = _build_registered_tools_catalog(registry)
+        schemas_block = _build_schema_hints(registry)
+
+    system = (
+        "Você é um roteador de ferramentas para um agente autônomo. "
+        "Sua tarefa é transformar a intenção do usuário em um JSON de plano. "
+        "Responda APENAS com JSON válido (sem markdown, sem texto extra).\n\n"
+        "FORMATO:\n"
+        "{\n"
+        "  \"intent\": string,\n"
+        "  \"user_message\": string,\n"
+        "  \"risk\": \"LOW\"|\"MEDIUM\"|\"HIGH\"|\"CRITICAL\",\n"
+        "  \"tool_calls\": [ { \"tool_name\": string, \"args\": object } ],\n"
+        "  \"final_response\": string\n"
+        "}\n\n"
+        "REGRAS DE RISCO:\n"
+        "- Se envolver apagar arquivos, formatar, shutdown, pagamentos/compras, login, transferir dinheiro: risk=CRITICAL.\n"
+        "- Se envolver automação de mouse/teclado (clicar/digitar) ou executar comandos: risk=HIGH (ou CRITICAL se destrutivo).\n\n"
+        "CONTEXTO (IMPORTANTE):\n"
+        "- Você pode receber mensagens anteriores com resultados de tools (ex.: 'TOOL_RESULT ...'). Use isso para decidir próximos passos.\n\n"
+        "REGRA MAIS IMPORTANTE (NÃO INVENTE AUTOMAÇÃO):\n"
+        "- Se o usuário pediu apenas orientação/explicação/dicas (ex: jogos, estudo, dúvidas), responda em texto: tool_calls=[] e risk=LOW.\n"
+        "- Só use tools de tela (screen.*), janela (win.focus_window) ou GUI (gui.* / screen.click_text) quando o usuário pedir explicitamente para ver/clicar/digitar na tela.\n"
+        "- Só use dev.* quando o usuário pedir explicitamente para executar/rodar comandos ou código.\n"
+        "- Nunca adivinhe window_title: só preencha window_title se o usuário fornecer o texto do título (ou substring) na mensagem.\n\n"
+        "REGRAS ESPECÍFICAS:\n"
+        "- Se usar discord.send_message, inclua antes um os.open_app com app='discord' para garantir que o Discord esteja aberto/em foco.\n\n"
+        "- jGRASP (MUITO IMPORTANTE):\n"
+        "  - Se o usuário pedir um programa/código Java 'funcional', 'completo', 'de matriz', 'de matemática', etc., use jgrasp.create_java_program OU jgrasp.write_code com o campo code (NÃO use apenas message).\n"
+        "  - O campo code deve conter Java compilável, sem markdown e sem cercas de código (```), e a classe pública deve bater com class_name.\n"
+        "  - Defaults: path='scratch/<ClassName>.java' e class_name='<ClassName>' (PascalCase).\n"
+        "  - Só use path com prefixo 'desktop:/' quando o usuário pedir explicitamente 'Área de Trabalho/desktop'.\n"
+        "  - Se o usuário disser que o jGRASP já está aberto e/ou que não precisa criar arquivo, prefira jgrasp.write_code com select_all=true (substitui o editor atual).\n"
+        "  - Se houver TOOL_RESULT indicando falha por foco/timing, ajuste settle_ms para mais alto (ex.: 1200) e garanta os.open_app('jgrasp') antes.\n\n"
+        "- Self-coding (opt-in):\n"
+        "  - Se NÃO existir uma tool adequada e o usuário pedir para 'criar uma ferramenta' ou 'criar um script', você pode propor self-coding.\n"
+        "  - Faça isso SOMENTE como plano explícito e seguro: (1) write_file em scratch/<nome>.py, (2) dev.run_python com script='scratch/<nome>.py'.\n"
+        "  - Alternativa (preferida para plugins): use dev.create_tool para criar um módulo em omniscia/tools/custom e recarregar tools no runtime.\n"
+        "  - Marque risk=CRITICAL e descreva claramente o que o script faz.\n"
+        "  - Nunca escreva scripts fora de scratch/.\n\n"
+        "FERRAMENTAS DISPONÍVEIS (tool_name -> args):\n"
+        + (
+            (
+                "IMPORTANTE: Use APENAS tool_name que esteja em 'TOOLS REGISTRADAS'.\n"
+                "IMPORTANTE: Prefira tools listadas em 'SCHEMAS' (args explícitos).\n"
+                "IMPORTANTE: Se precisar descobrir mais tools, você pode chamar core.list_tools como primeiro passo e então replanejar.\n\n"
+                + ("SCHEMAS (somente se tool existir):\n" + (schemas_block + "\n\n" if schemas_block else ""))
+                + ("TOOLS REGISTRADAS (use apenas estas):\n" + tools_block if tools_block else "")
+            )
+            if registry is not None
+            else static_tools_block
+        )
     )
 
     llm_model = settings.llm_model

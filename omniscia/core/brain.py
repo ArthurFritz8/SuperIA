@@ -26,7 +26,7 @@ from rich.panel import Panel
 
 from omniscia.core.config import Settings
 from omniscia.core.hitl import require_approval
-from omniscia.core.router import route, route_llm
+from omniscia.core.router import route_llm, route_with_registry
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
@@ -289,7 +289,7 @@ def run_brain_loop(settings: Settings) -> None:
 
         memory.append("user_message", {"text": user_message})
 
-        plan = route(settings, user_message)
+        plan = route_with_registry(settings, user_message, registry=registry)
 
         # Para mensagens de orientação/conversa, responda diretamente com LLM (sem tools).
         # Isso deixa o assistente muito mais "Jarvis" no dia-a-dia.
@@ -637,7 +637,7 @@ def _auto_remember_best_effort(
             {"role": "assistant", "content": str(assistant_response or "").strip()[:2000]},
         ]
 
-        plan = route_llm(settings, prompt, context_messages=ctx)
+        plan = route_llm(settings, prompt, context_messages=ctx, registry=registry)
         if plan is None or not plan.tool_calls:
             return
 
@@ -975,7 +975,7 @@ def _execute_plan_react(console: Console, settings: Settings, registry, plan: Pl
                 trace_messages = trace_messages[-8:]
 
         # Replaneja via LLM (mantendo o pedido original e fornecendo o rastro).
-        new_plan = route_llm(settings, original_user_message, context_messages=trace_messages)
+        new_plan = route_llm(settings, original_user_message, context_messages=trace_messages, registry=registry)
         if new_plan is None:
             console.print("[yellow]Não consegui replanejar via LLM; parei por segurança.[/yellow]")
             return None
