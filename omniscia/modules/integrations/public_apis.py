@@ -139,14 +139,24 @@ from __future__ import annotations
 import json
 import os
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
 
 from omniscia.core.tools import ToolRegistry, ToolSpec
 from omniscia.core.types import ToolResult
+
+
+def _normalize(text: str) -> str:
+    # Normalização simples para busca case/acentos-insensível.
+    t = unicodedata.normalize("NFKD", text)
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    t = t.casefold()
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
 
 
 _ALLOWED_HOSTS = {
@@ -1645,8 +1655,12 @@ def _geo_geocode(args: dict[str, Any]) -> ToolResult:
         if not isinstance(r, dict):
             continue
         try:
-            lat = float(r.get("lat"))
-            lon = float(r.get("lon"))
+            lat_raw = r.get("lat")
+            lon_raw = r.get("lon")
+            if lat_raw is None or lon_raw is None:
+                continue
+            lat = float(str(lat_raw).replace(",", "."))
+            lon = float(str(lon_raw).replace(",", "."))
         except Exception:
             continue
         slim.append(
@@ -1666,8 +1680,8 @@ def _geo_geocode(args: dict[str, Any]) -> ToolResult:
 
 def _geo_reverse_geocode(args: dict[str, Any]) -> ToolResult:
     try:
-        lat = float(args.get("lat"))
-        lon = float(args.get("lon"))
+        lat = float(str(args.get("lat", "")).replace(",", "."))
+        lon = float(str(args.get("lon", "")).replace(",", "."))
     except Exception:
         return ToolResult(status="error", error="informe lat e lon")
 
@@ -2017,8 +2031,9 @@ def _crossref_search(args: dict[str, Any]) -> ToolResult:
             if not isinstance(it, dict):
                 continue
             title = ""
-            if isinstance(it.get("title"), list) and it.get("title"):
-                title = str(it.get("title")[0] or "")
+            titles = it.get("title")
+            if isinstance(titles, list) and titles:
+                title = str(titles[0] or "")
             doi = str(it.get("DOI", "") or "")
             url = str(it.get("URL", "") or "")
             year = None
@@ -2709,16 +2724,20 @@ def _random_user(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error="sem resultados")
 
     r0 = results[0]
-    name = r0.get("name") if isinstance(r0.get("name"), dict) else {}
-    loc = r0.get("location") if isinstance(r0.get("location"), dict) else {}
+    name_raw = r0.get("name")
+    name: dict[str, Any] = cast(dict[str, Any], name_raw) if isinstance(name_raw, dict) else {}
+    loc_raw = r0.get("location")
+    loc: dict[str, Any] = cast(dict[str, Any], loc_raw) if isinstance(loc_raw, dict) else {}
+    login_raw = r0.get("login")
+    picture_raw = r0.get("picture")
     out = {
         "name": " ".join([str(name.get("first", "") or "").strip(), str(name.get("last", "") or "").strip()]).strip(),
         "email": r0.get("email"),
         "phone": r0.get("phone"),
         "country": loc.get("country"),
         "city": loc.get("city"),
-        "username": ((r0.get("login") or {}).get("username") if isinstance(r0.get("login"), dict) else None),
-        "picture": ((r0.get("picture") or {}).get("large") if isinstance(r0.get("picture"), dict) else None),
+        "username": (login_raw.get("username") if isinstance(login_raw, dict) else None),
+        "picture": (picture_raw.get("large") if isinstance(picture_raw, dict) else None),
         "source": "randomuser.me",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -2874,8 +2893,10 @@ def _pypi_project(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
-    urls = info.get("project_urls") if isinstance(info.get("project_urls"), dict) else {}
+    info_raw = data.get("info")
+    info: dict[str, Any] = cast(dict[str, Any], info_raw) if isinstance(info_raw, dict) else {}
+    urls_raw = info.get("project_urls")
+    urls: dict[str, Any] = cast(dict[str, Any], urls_raw) if isinstance(urls_raw, dict) else {}
 
     out = {
         "name": info.get("name") or name,
@@ -2905,6 +2926,7 @@ def _npm_package(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
+    kw = data.get("keywords")
     out = {
         "name": data.get("name") or name,
         "version": data.get("version"),
@@ -2912,7 +2934,7 @@ def _npm_package(args: dict[str, Any]) -> ToolResult:
         "license": data.get("license"),
         "homepage": data.get("homepage"),
         "repository": (data.get("repository") or {}).get("url") if isinstance(data.get("repository"), dict) else data.get("repository"),
-        "keywords": (data.get("keywords")[:15] if isinstance(data.get("keywords"), list) else []),
+        "keywords": (kw[:15] if isinstance(kw, list) else []),
         "source": "registry.npmjs.org",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -2930,7 +2952,8 @@ def _cratesio_crate(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    crate = data.get("crate") if isinstance(data.get("crate"), dict) else {}
+    crate_raw = data.get("crate")
+    crate: dict[str, Any] = cast(dict[str, Any], crate_raw) if isinstance(crate_raw, dict) else {}
     out = {
         "name": crate.get("id") or name,
         "version": crate.get("newest_version"),
@@ -2985,8 +3008,10 @@ def _github_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3017,6 +3042,7 @@ def _rdap_domain(args: dict[str, Any]) -> ToolResult:
                 continue
             slim_events.append({"eventAction": e.get("eventAction"), "eventDate": e.get("eventDate")})
 
+    links = data.get("links")
     out = {
         "objectClassName": data.get("objectClassName"),
         "ldhName": data.get("ldhName"),
@@ -3024,7 +3050,7 @@ def _rdap_domain(args: dict[str, Any]) -> ToolResult:
         "handle": data.get("handle"),
         "status": data.get("status") if isinstance(data.get("status"), list) else [],
         "events": slim_events,
-        "links": (data.get("links")[:6] if isinstance(data.get("links"), list) else []),
+        "links": (links[:6] if isinstance(links, list) else []),
         "source": "rdap.org",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -3067,8 +3093,11 @@ def _bgpview_ip(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    d = data.get("data") if isinstance(data.get("data"), dict) else {}
-    asn = d.get("asn") if isinstance(d.get("asn"), dict) else {}
+    d_raw = data.get("data")
+    d: dict[str, Any] = cast(dict[str, Any], d_raw) if isinstance(d_raw, dict) else {}
+    asn_raw = d.get("asn")
+    asn: dict[str, Any] = cast(dict[str, Any], asn_raw) if isinstance(asn_raw, dict) else {}
+    prefixes = d.get("prefixes")
     out = {
         "ip": ip,
         "asn": {
@@ -3077,7 +3106,7 @@ def _bgpview_ip(args: dict[str, Any]) -> ToolResult:
             "description": asn.get("description"),
             "country_code": asn.get("country_code"),
         },
-        "prefixes": (d.get("prefixes")[:6] if isinstance(d.get("prefixes"), list) else []),
+        "prefixes": (prefixes[:6] if isinstance(prefixes, list) else []),
         "source": "api.bgpview.io",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -3094,14 +3123,17 @@ def _bgpview_asn(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    d = data.get("data") if isinstance(data.get("data"), dict) else {}
+    d_raw = data.get("data")
+    d: dict[str, Any] = cast(dict[str, Any], d_raw) if isinstance(d_raw, dict) else {}
+    email_contacts_raw = d.get("email_contacts")
+    email_contacts = email_contacts_raw[:10] if isinstance(email_contacts_raw, list) else []
     out = {
         "asn": d.get("asn"),
         "name": d.get("name"),
         "description": str(d.get("description", "") or "")[:320],
         "country_code": d.get("country_code"),
         "website": d.get("website"),
-        "email_contacts": (d.get("email_contacts")[:10] if isinstance(d.get("email_contacts"), list) else []),
+        "email_contacts": email_contacts,
         "source": "api.bgpview.io",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -3225,8 +3257,10 @@ def _cloudflare_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3243,8 +3277,10 @@ def _discord_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3266,7 +3302,8 @@ def _ripestat_ip(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    d = data.get("data") if isinstance(data.get("data"), dict) else {}
+    d_raw = data.get("data")
+    d: dict[str, Any] = cast(dict[str, Any], d_raw) if isinstance(d_raw, dict) else {}
     out = {
         "resource": ip,
         "prefix": d.get("prefix"),
@@ -3294,11 +3331,16 @@ def _ripestat_asn(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    d = data.get("data") if isinstance(data.get("data"), dict) else {}
+    d_raw = data.get("data")
+    d: dict[str, Any] = cast(dict[str, Any], d_raw) if isinstance(d_raw, dict) else {}
 
     # Mantém saída pequena; alguns campos são grandes.
-    announced = d.get("announced_space") if isinstance(d.get("announced_space"), dict) else {}
-    asns = d.get("asns") if isinstance(d.get("asns"), list) else []
+    announced_raw = d.get("announced_space")
+    announced: dict[str, Any] = cast(dict[str, Any], announced_raw) if isinstance(announced_raw, dict) else {}
+    asns_raw = d.get("asns")
+    asns = asns_raw if isinstance(asns_raw, list) else []
+    countries_raw = d.get("countries")
+    countries = countries_raw[:20] if isinstance(countries_raw, list) else []
     out = {
         "asn": int(asn_raw),
         "holder": d.get("holder"),
@@ -3307,7 +3349,7 @@ def _ripestat_asn(args: dict[str, Any]) -> ToolResult:
             "v4": announced.get("v4"),
             "v6": announced.get("v6"),
         },
-        "countries": (d.get("countries")[:20] if isinstance(d.get("countries"), list) else []),
+        "countries": countries,
         "as_set": d.get("as_set"),
         "asns": (asns[:20] if asns else []),
         "source": "stat.ripe.net",
@@ -3362,6 +3404,8 @@ def _urlhaus_url(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
+    tags_raw = data.get("tags")
+    tags = tags_raw[:20] if isinstance(tags_raw, list) else []
     out = {
         "url": url_q,
         "query_status": data.get("query_status"),
@@ -3370,7 +3414,7 @@ def _urlhaus_url(args: dict[str, Any]) -> ToolResult:
         "firstseen": data.get("firstseen"),
         "lastseen": data.get("lastseen"),
         "threat": data.get("threat"),
-        "tags": (data.get("tags")[:20] if isinstance(data.get("tags"), list) else []),
+        "tags": tags,
         "source": "urlhaus-api.abuse.ch",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -3387,7 +3431,8 @@ def _urlhaus_host(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    urls = data.get("urls") if isinstance(data.get("urls"), list) else []
+    urls_raw = data.get("urls")
+    urls = urls_raw if isinstance(urls_raw, list) else []
     slim_urls: list[dict[str, Any]] = []
     for u in urls[:10]:
         if not isinstance(u, dict):
@@ -3433,7 +3478,8 @@ def _threatfox_ioc_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    results = data.get("data") if isinstance(data.get("data"), list) else []
+    results_raw = data.get("data")
+    results = results_raw if isinstance(results_raw, list) else []
     slim: list[dict[str, Any]] = []
     for r in results[:limit]:
         if not isinstance(r, dict):
@@ -3467,8 +3513,10 @@ def _npm_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3485,8 +3533,10 @@ def _openai_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3505,8 +3555,10 @@ def _docker_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    result = data.get("result") if isinstance(data.get("result"), dict) else {}
-    overall = result.get("status_overall") if isinstance(result.get("status_overall"), dict) else {}
+    result_raw = data.get("result")
+    result: dict[str, Any] = cast(dict[str, Any], result_raw) if isinstance(result_raw, dict) else {}
+    overall_raw = result.get("status_overall")
+    overall: dict[str, Any] = cast(dict[str, Any], overall_raw) if isinstance(overall_raw, dict) else {}
     out = {
         "status": overall.get("status"),
         "status_code": overall.get("status_code"),
@@ -3592,8 +3644,10 @@ def _atlassian_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3610,8 +3664,10 @@ def _zoom_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3628,8 +3684,10 @@ def _spacex_latest_launch(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    links = data.get("links") if isinstance(data.get("links"), dict) else {}
-    patch = links.get("patch") if isinstance(links.get("patch"), dict) else {}
+    links_raw = data.get("links")
+    links: dict[str, Any] = cast(dict[str, Any], links_raw) if isinstance(links_raw, dict) else {}
+    patch_raw = links.get("patch")
+    patch: dict[str, Any] = cast(dict[str, Any], patch_raw) if isinstance(patch_raw, dict) else {}
     out = {
         "name": data.get("name"),
         "date_utc": data.get("date_utc"),
@@ -3671,8 +3729,10 @@ def _archiveorg_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    resp = data.get("response") if isinstance(data.get("response"), dict) else {}
-    docs = resp.get("docs") if isinstance(resp.get("docs"), list) else []
+    resp_raw = data.get("response")
+    resp: dict[str, Any] = cast(dict[str, Any], resp_raw) if isinstance(resp_raw, dict) else {}
+    docs_raw = resp.get("docs")
+    docs = docs_raw if isinstance(docs_raw, list) else []
     slim: list[dict[str, Any]] = []
     for d in docs[:limit]:
         if not isinstance(d, dict):
@@ -3718,22 +3778,34 @@ def _tvmaze_search(args: dict[str, Any]) -> ToolResult:
     for r in data[:limit]:
         if not isinstance(r, dict):
             continue
-        show = r.get("show") if isinstance(r.get("show"), dict) else {}
-        rating = show.get("rating") if isinstance(show.get("rating"), dict) else {}
-        webc = show.get("webChannel") if isinstance(show.get("webChannel"), dict) else {}
-        image = show.get("image") if isinstance(show.get("image"), dict) else {}
+        show_raw = r.get("show")
+        show: dict[str, Any] = cast(dict[str, Any], show_raw) if isinstance(show_raw, dict) else {}
+        rating_raw = show.get("rating")
+        rating: dict[str, Any] = cast(dict[str, Any], rating_raw) if isinstance(rating_raw, dict) else {}
+        webc_raw = show.get("webChannel")
+        webc: dict[str, Any] = cast(dict[str, Any], webc_raw) if isinstance(webc_raw, dict) else {}
+        image_raw = show.get("image")
+        image: dict[str, Any] = cast(dict[str, Any], image_raw) if isinstance(image_raw, dict) else {}
+        genres_raw = show.get("genres")
+        genres = genres_raw[:10] if isinstance(genres_raw, list) else []
+
+        network_raw = show.get("network")
+        network_name = None
+        if isinstance(network_raw, dict):
+            network_name = network_raw.get("name")
+
         slim.append(
             {
                 "name": show.get("name"),
                 "type": show.get("type"),
                 "language": show.get("language"),
-                "genres": (show.get("genres")[:10] if isinstance(show.get("genres"), list) else []),
+                "genres": genres,
                 "status": show.get("status"),
                 "premiered": show.get("premiered"),
                 "officialSite": show.get("officialSite"),
                 "url": show.get("url"),
                 "rating": rating.get("average"),
-                "network": (webc.get("name") or (show.get("network") or {}).get("name")) if isinstance(show.get("network"), dict) else webc.get("name"),
+                "network": (webc.get("name") or network_name),
                 "image": image.get("medium"),
             }
         )
@@ -3762,7 +3834,8 @@ def _mealdb_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    meals = data.get("meals") if isinstance(data.get("meals"), list) else []
+    meals_raw = data.get("meals")
+    meals = meals_raw if isinstance(meals_raw, list) else []
     slim: list[dict[str, Any]] = []
     for m in meals[:limit]:
         if not isinstance(m, dict):
@@ -3814,8 +3887,10 @@ def _universities_search(args: dict[str, Any]) -> ToolResult:
     for u in data[:limit]:
         if not isinstance(u, dict):
             continue
-        web_pages = u.get("web_pages") if isinstance(u.get("web_pages"), list) else []
-        domains = u.get("domains") if isinstance(u.get("domains"), list) else []
+        web_pages_raw = u.get("web_pages")
+        web_pages = web_pages_raw if isinstance(web_pages_raw, list) else []
+        domains_raw = u.get("domains")
+        domains = domains_raw if isinstance(domains_raw, list) else []
         slim.append(
             {
                 "name": u.get("name"),
@@ -3902,7 +3977,8 @@ def _nationalize_name(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    countries = data.get("country") if isinstance(data.get("country"), list) else []
+    countries_raw = data.get("country")
+    countries = countries_raw if isinstance(countries_raw, list) else []
     slim: list[dict[str, Any]] = []
     for c in countries[:limit]:
         if not isinstance(c, dict):
@@ -3936,8 +4012,10 @@ def _gitlab_status(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    page = data.get("page") if isinstance(data.get("page"), dict) else {}
-    status = data.get("status") if isinstance(data.get("status"), dict) else {}
+    page_raw = data.get("page")
+    page: dict[str, Any] = cast(dict[str, Any], page_raw) if isinstance(page_raw, dict) else {}
+    status_raw = data.get("status")
+    status: dict[str, Any] = cast(dict[str, Any], status_raw) if isinstance(status_raw, dict) else {}
     out = {
         "indicator": status.get("indicator"),
         "description": status.get("description"),
@@ -3972,13 +4050,16 @@ def _jikan_anime_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    items = data.get("data") if isinstance(data.get("data"), list) else []
+    items_raw = data.get("data")
+    items = items_raw if isinstance(items_raw, list) else []
     slim: list[dict[str, Any]] = []
     for it in items[:limit]:
         if not isinstance(it, dict):
             continue
-        images = it.get("images") if isinstance(it.get("images"), dict) else {}
-        jpg = images.get("jpg") if isinstance(images.get("jpg"), dict) else {}
+        images_raw = it.get("images")
+        images: dict[str, Any] = cast(dict[str, Any], images_raw) if isinstance(images_raw, dict) else {}
+        jpg_raw = images.get("jpg")
+        jpg: dict[str, Any] = cast(dict[str, Any], jpg_raw) if isinstance(jpg_raw, dict) else {}
         slim.append(
             {
                 "id": it.get("mal_id"),
@@ -4024,7 +4105,8 @@ def _met_search(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error="resposta inesperada")
 
     total = data.get("total")
-    object_ids = data.get("objectIDs") if isinstance(data.get("objectIDs"), list) else []
+    object_ids_raw = data.get("objectIDs")
+    object_ids = object_ids_raw if isinstance(object_ids_raw, list) else []
     top_ids = [oid for oid in object_ids[:limit] if isinstance(oid, int) or (isinstance(oid, str) and str(oid).isdigit())]
 
     previews: list[dict[str, Any]] = []
@@ -4121,10 +4203,12 @@ def _artic_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    cfg = data.get("config") if isinstance(data.get("config"), dict) else {}
+    cfg_raw = data.get("config")
+    cfg: dict[str, Any] = cast(dict[str, Any], cfg_raw) if isinstance(cfg_raw, dict) else {}
     iiif_url = str(cfg.get("iiif_url") or "").strip()
 
-    items = data.get("data") if isinstance(data.get("data"), list) else []
+    items_raw = data.get("data")
+    items = items_raw if isinstance(items_raw, list) else []
     slim: list[dict[str, Any]] = []
     for it in items[:limit]:
         if not isinstance(it, dict):
@@ -4188,9 +4272,12 @@ def _chesscom_stats(args: dict[str, Any]) -> ToolResult:
         mode = data.get(mode_key)
         if not isinstance(mode, dict):
             return None
-        last = mode.get("last") if isinstance(mode.get("last"), dict) else {}
-        best = mode.get("best") if isinstance(mode.get("best"), dict) else {}
-        rec = mode.get("record") if isinstance(mode.get("record"), dict) else {}
+        last_raw = mode.get("last")
+        last: dict[str, Any] = cast(dict[str, Any], last_raw) if isinstance(last_raw, dict) else {}
+        best_raw = mode.get("best")
+        best: dict[str, Any] = cast(dict[str, Any], best_raw) if isinstance(best_raw, dict) else {}
+        rec_raw = mode.get("record")
+        rec: dict[str, Any] = cast(dict[str, Any], rec_raw) if isinstance(rec_raw, dict) else {}
         return {
             "rating": last.get("rating"),
             "best": best.get("rating"),
@@ -4305,7 +4392,8 @@ def _deck_draw(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    cards = data.get("cards") if isinstance(data.get("cards"), list) else []
+    cards_raw = data.get("cards")
+    cards = cards_raw if isinstance(cards_raw, list) else []
     slim: list[dict[str, Any]] = []
     for c in cards[:count]:
         if not isinstance(c, dict):
@@ -4407,7 +4495,8 @@ def _itunes_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    results = data.get("results") if isinstance(data.get("results"), list) else []
+    results_raw = data.get("results")
+    results = results_raw if isinstance(results_raw, list) else []
     slim: list[dict[str, Any]] = []
     for r in results[:limit]:
         if not isinstance(r, dict):
@@ -4449,15 +4538,19 @@ def _gutendex_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    items = data.get("results") if isinstance(data.get("results"), list) else []
+    items_raw = data.get("results")
+    items = items_raw if isinstance(items_raw, list) else []
     slim: list[dict[str, Any]] = []
     for b in items[:limit]:
         if not isinstance(b, dict):
             continue
-        authors = b.get("authors") if isinstance(b.get("authors"), list) else []
+        authors_raw = b.get("authors")
+        authors = authors_raw if isinstance(authors_raw, list) else []
         author_names = [a.get("name") for a in authors if isinstance(a, dict) and a.get("name")][:3]
-        languages = b.get("languages") if isinstance(b.get("languages"), list) else []
-        formats = b.get("formats") if isinstance(b.get("formats"), dict) else {}
+        languages_raw = b.get("languages")
+        languages = languages_raw if isinstance(languages_raw, list) else []
+        formats_raw = b.get("formats")
+        formats: dict[str, Any] = cast(dict[str, Any], formats_raw) if isinstance(formats_raw, dict) else {}
         best = formats.get("text/html") or formats.get("text/html; charset=utf-8") or formats.get("application/epub+zip") or formats.get("application/pdf")
         slim.append(
             {
@@ -4502,12 +4595,14 @@ def _openfoodfacts_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    products = data.get("products") if isinstance(data.get("products"), list) else []
+    products_raw = data.get("products")
+    products = products_raw if isinstance(products_raw, list) else []
     slim: list[dict[str, Any]] = []
     for p in products[:limit]:
         if not isinstance(p, dict):
             continue
-        nutr = p.get("nutriments") if isinstance(p.get("nutriments"), dict) else {}
+        nutr_raw = p.get("nutriments")
+        nutr: dict[str, Any] = cast(dict[str, Any], nutr_raw) if isinstance(nutr_raw, dict) else {}
         code = p.get("code")
         url = f"https://world.openfoodfacts.org/product/{code}" if code else p.get("url")
         slim.append(
@@ -4584,20 +4679,28 @@ def _googlebooks_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    items = data.get("items") if isinstance(data.get("items"), list) else []
+    items_raw = data.get("items")
+    items = items_raw if isinstance(items_raw, list) else []
     slim: list[dict[str, Any]] = []
     for it in items[:limit]:
         if not isinstance(it, dict):
             continue
-        vi = it.get("volumeInfo") if isinstance(it.get("volumeInfo"), dict) else {}
-        links = vi.get("imageLinks") if isinstance(vi.get("imageLinks"), dict) else {}
+        vi_raw = it.get("volumeInfo")
+        vi: dict[str, Any] = cast(dict[str, Any], vi_raw) if isinstance(vi_raw, dict) else {}
+        links_raw = vi.get("imageLinks")
+        links: dict[str, Any] = cast(dict[str, Any], links_raw) if isinstance(links_raw, dict) else {}
+
+        authors_raw = vi.get("authors")
+        authors = authors_raw[:5] if isinstance(authors_raw, list) else []
+        categories_raw = vi.get("categories")
+        categories = categories_raw[:5] if isinstance(categories_raw, list) else []
         slim.append(
             {
                 "id": it.get("id"),
                 "title": vi.get("title"),
-                "authors": (vi.get("authors")[:5] if isinstance(vi.get("authors"), list) else []),
+                "authors": authors,
                 "publishedDate": vi.get("publishedDate"),
-                "categories": (vi.get("categories")[:5] if isinstance(vi.get("categories"), list) else []),
+                "categories": categories,
                 "pageCount": vi.get("pageCount"),
                 "language": vi.get("language"),
                 "infoLink": vi.get("infoLink"),
@@ -4617,10 +4720,12 @@ def _quote_random(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
+    tags_raw = data.get("tags")
+    tags = tags_raw[:10] if isinstance(tags_raw, list) else []
     out = {
         "content": data.get("content"),
         "author": data.get("author"),
-        "tags": (data.get("tags")[:10] if isinstance(data.get("tags"), list) else []),
+        "tags": tags,
         "source": "api.quotable.io",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
@@ -4633,7 +4738,8 @@ def _advice_random(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    slip = data.get("slip") if isinstance(data.get("slip"), dict) else {}
+    slip_raw = data.get("slip")
+    slip: dict[str, Any] = cast(dict[str, Any], slip_raw) if isinstance(slip_raw, dict) else {}
     out = {
         "id": slip.get("id"),
         "advice": slip.get("advice"),
@@ -4746,12 +4852,14 @@ def _scryfall_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    cards = data.get("data") if isinstance(data.get("data"), list) else []
+    cards_raw = data.get("data")
+    cards = cards_raw if isinstance(cards_raw, list) else []
     slim: list[dict[str, Any]] = []
     for c in cards[:limit]:
         if not isinstance(c, dict):
             continue
-        img = c.get("image_uris") if isinstance(c.get("image_uris"), dict) else {}
+        img_raw = c.get("image_uris")
+        img: dict[str, Any] = cast(dict[str, Any], img_raw) if isinstance(img_raw, dict) else {}
         slim.append(
             {
                 "name": c.get("name"),
@@ -4781,7 +4889,8 @@ def _scryfall_random(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    img = data.get("image_uris") if isinstance(data.get("image_uris"), dict) else {}
+    img_raw = data.get("image_uris")
+    img: dict[str, Any] = cast(dict[str, Any], img_raw) if isinstance(img_raw, dict) else {}
     out = {
         "name": data.get("name"),
         "mana_cost": data.get("mana_cost"),
@@ -4821,13 +4930,16 @@ def _rickmorty_character_search(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    results = data.get("results") if isinstance(data.get("results"), list) else []
+    results_raw = data.get("results")
+    results = results_raw if isinstance(results_raw, list) else []
     slim: list[dict[str, Any]] = []
     for c in results[:limit]:
         if not isinstance(c, dict):
             continue
-        origin = c.get("origin") if isinstance(c.get("origin"), dict) else {}
-        location = c.get("location") if isinstance(c.get("location"), dict) else {}
+        origin_raw = c.get("origin")
+        origin: dict[str, Any] = cast(dict[str, Any], origin_raw) if isinstance(origin_raw, dict) else {}
+        location_raw = c.get("location")
+        location: dict[str, Any] = cast(dict[str, Any], location_raw) if isinstance(location_raw, dict) else {}
         slim.append(
             {
                 "id": c.get("id"),
@@ -4843,7 +4955,8 @@ def _rickmorty_character_search(args: dict[str, Any]) -> ToolResult:
             }
         )
 
-    info = data.get("info") if isinstance(data.get("info"), dict) else {}
+    info_raw = data.get("info")
+    info: dict[str, Any] = cast(dict[str, Any], info_raw) if isinstance(info_raw, dict) else {}
     out = {
         "query": query,
         "count": len(slim),
@@ -4874,7 +4987,8 @@ def _sunrise_sunset(args: dict[str, Any]) -> ToolResult:
     if not isinstance(data, dict):
         return ToolResult(status="error", error="resposta inesperada")
 
-    results = data.get("results") if isinstance(data.get("results"), dict) else {}
+    results_raw = data.get("results")
+    results: dict[str, Any] = cast(dict[str, Any], results_raw) if isinstance(results_raw, dict) else {}
     out = {
         "lat": lat,
         "lon": lon,
@@ -4947,7 +5061,8 @@ def _ibge_states(args: dict[str, Any]) -> ToolResult:
     for s in data:
         if not isinstance(s, dict):
             continue
-        reg = s.get("regiao") if isinstance(s.get("regiao"), dict) else {}
+        reg_raw = s.get("regiao")
+        reg: dict[str, Any] = cast(dict[str, Any], reg_raw) if isinstance(reg_raw, dict) else {}
         slim.append({"id": s.get("id"), "sigla": s.get("sigla"), "nome": s.get("nome"), "regiao": reg.get("nome")})
 
     slim.sort(key=lambda x: (str(x.get("sigla") or "")))

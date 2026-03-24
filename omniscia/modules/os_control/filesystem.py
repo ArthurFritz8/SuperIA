@@ -231,6 +231,8 @@ def _win_known_folder(name: str) -> Path:
         raise RuntimeError(f"SHGetKnownFolderPath falhou (hr={hr})")
 
     try:
+        if not p_path.value:
+            raise RuntimeError("SHGetKnownFolderPath retornou path vazio")
         return Path(p_path.value)
     finally:
         ctypes.windll.ole32.CoTaskMemFree(p_path)

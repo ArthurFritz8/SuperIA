@@ -17,7 +17,7 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class ChromaVectorMemory:
         self._embed_fn = SentenceTransformerEmbeddingFunction(model_name=self._embed_model)
         self._col = self._client.get_or_create_collection(
             name=self._collection_name,
-            embedding_function=self._embed_fn,
+            embedding_function=cast(Any, self._embed_fn),
             metadata={"hnsw:space": "cosine"},
         )
 

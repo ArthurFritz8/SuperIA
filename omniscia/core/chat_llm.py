@@ -47,6 +47,9 @@ def chat_reply(
     if not _has_llm_config(settings):
         raise RuntimeError("LLM não configurado (OMNI_LLM_PROVIDER/OMNI_LLM_MODEL/OMNI_LLM_API_KEY)")
 
+    model = settings.llm_model
+    assert model is not None
+
     apply_litellm_env(settings)
 
     try:
@@ -104,7 +107,7 @@ def chat_reply(
     try:
         try:
             resp: Any = completion(
-                model=settings.llm_model,
+                model=model,
                 messages=msgs,
                 temperature=float(temperature),
             )
@@ -124,7 +127,7 @@ def chat_reply(
                         msgs2.append({"role": "user", "content": user_text})
                     else:
                         msgs2.append(m)
-                resp = completion(model=settings.llm_model, messages=msgs2, temperature=float(temperature))
+                resp = completion(model=model, messages=msgs2, temperature=float(temperature))
                 content = resp["choices"][0]["message"]["content"]  # type: ignore[index]
                 text = (content or "").strip()
             else:

@@ -32,12 +32,12 @@ def start_proactive_scheduler(
     """
 
     try:
-        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.schedulers.background import BackgroundScheduler  # type: ignore[reportMissingImports]
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Dependência ausente: apscheduler") from exc
 
     try:
-        import psutil
+        import psutil  # type: ignore[reportMissingImports]
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Dependência ausente: psutil") from exc
 
