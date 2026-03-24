@@ -320,6 +320,11 @@ def run_brain_loop(settings: Settings) -> None:
         if profile_ctx:
             router_ctx.append({"role": "assistant", "content": profile_ctx})
 
+        # Contexto recente (memória baseline) para coerência de assunto.
+        # Ex.: se o usuário estava falando de "Pi Network" e pede "o gráfico da moeda",
+        # o router/LLM recebe esse histórico e evita consultas genéricas.
+        router_ctx.extend(_build_router_context_messages(memory, current_user_message=user_message, limit_messages=8))
+
         # Replay do último plano (sessão) — opt-in.
         replay_norm = re.sub(r"\s+", " ", (user_message or "").strip().lower())
         wants_replay = replay_norm in {
@@ -761,6 +766,50 @@ def _build_chat_history(
     return msgs
 
 
+def _build_router_context_messages(
+    memory: JsonlMemoryStore,
+    *,
+    current_user_message: str,
+    limit_messages: int = 8,
+) -> list[dict[str, str]]:
+    """Contexto curto para roteamento/planejamento.
+
+    Objetivo:
+    - Dar coerência para pedidos ambíguos (ex.: "o gráfico da moeda") usando o
+      assunto recente da conversa.
+
+    Observação:
+    - Mantém apenas roles "user"/"assistant".
+    - Não inclui tool outputs para não poluir o roteamento heurístico.
+    """
+
+    events = memory.recent(limit=40)
+
+    # Remove o último user_message (o atual), já que será adicionado separadamente.
+    if events:
+        e0 = events[0]
+        if e0.kind == "user_message" and str((e0.payload or {}).get("text", "")).strip() == str(current_user_message).strip():
+            events = events[1:]
+
+    msgs: list[dict[str, str]] = []
+    for e in reversed(events):
+        if e.kind == "user_message":
+            t = str((e.payload or {}).get("text", "") or "").strip()
+            if t:
+                msgs.append({"role": "user", "content": t})
+        elif e.kind == "agent_response":
+            t = str((e.payload or {}).get("text", "") or "").strip()
+            if t:
+                msgs.append({"role": "assistant", "content": t})
+
+    # Mantém apenas as últimas mensagens (pares recentes).
+    if limit_messages < 1:
+        return []
+    if len(msgs) > limit_messages:
+        msgs = msgs[-limit_messages:]
+    return msgs
+
+
 def _auto_remember_best_effort(
     *,
     console: Console,
@@ -1132,15 +1181,16 @@ def _execute_plan(
             {"intent": plan.intent, "router_risk": str(plan.risk), "effective_risk": str(effective_plan.risk)},
         )
 
-    if effective_plan.risk == plan.risk:
-        console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
-    else:
-        console.print(
-            Panel.fit(
-                f"Intent: {plan.intent}\nRisk(router): {plan.risk}\nRisk(effective): {effective_plan.risk}",
-                title="Plano",
+    if getattr(settings, "ui_show_plan", False):
+        if effective_plan.risk == plan.risk:
+            console.print(Panel.fit(f"Intent: {plan.intent}\nRisk: {plan.risk}", title="Plano"))
+        else:
+            console.print(
+                Panel.fit(
+                    f"Intent: {plan.intent}\nRisk(router): {plan.risk}\nRisk(effective): {effective_plan.risk}",
+                    title="Plano",
+                )
             )
-        )
 
     if not require_approval(
         normalized_plan,
@@ -1241,7 +1291,7 @@ def _execute_plan(
         # Observabilidade do MVP:
         # - Em agentes, tool output é parte essencial do feedback loop.
         # - Truncamos para não poluir o terminal nem expor dados demais por acidente.
-        if result.status == "ok" and result.output:
+        if getattr(settings, "ui_show_tool_outputs", True) and result.status == "ok" and result.output:
             out = result.output.strip()
             if len(out) > 2000:
                 out = out[:2000] + "\n... [truncado]"
@@ -1340,7 +1390,8 @@ def _execute_plan_react(
                     pass
             return None
 
-        console.print(Panel.fit(f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}", title="Plano"))
+        if getattr(settings, "ui_show_react_steps", False):
+            console.print(Panel.fit(f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}", title="Plano"))
 
         # Policy enforcement por passo (antes de HITL)
         if getattr(settings, "policy_enabled", True):
@@ -1416,7 +1467,7 @@ def _execute_plan_react(
         if result.status == "error":
             console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
 
-        if result.output:
+        if getattr(settings, "ui_show_tool_outputs", True) and result.output:
             out = result.output.strip()
             if len(out) > 2000:
                 out = out[:2000] + "\n... [truncado]"
@@ -1477,10 +1528,19 @@ def _execute_plan_react(
                 trace_messages = trace_messages[-8:]
 
         # Replaneja via LLM (mantendo o pedido original e fornecendo o rastro).
-        new_plan = route_llm(settings, original_user_message, context_messages=trace_messages, registry=registry)
+        # Importante: também injeta contexto recente da conversa para manter coerência do assunto.
+        conv_ctx = _build_router_context_messages(memory, current_user_message=original_user_message, limit_messages=8)
+        replanning_ctx = conv_ctx + trace_messages
+        new_plan = route_llm(settings, original_user_message, context_messages=replanning_ctx, registry=registry)
         if new_plan is None:
-            console.print("[yellow]Não consegui replanejar via LLM; parei por segurança.[/yellow]")
-            return None
+            # Fallback: não aborta por rate limit/quota. Cai para heurística (determinística).
+            safe_settings = replace(settings, router_mode="heuristic")
+            new_plan = route_with_registry(
+                safe_settings,
+                original_user_message,
+                registry=registry,
+                context_messages=replanning_ctx,
+            )
 
         memory.append(
             "plan",

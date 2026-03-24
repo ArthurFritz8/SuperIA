@@ -381,6 +381,17 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         ToolSpec(
+            name="finance.crypto_market_chart",
+            description=(
+                "Série histórica (gráfico) de cripto via CoinGecko. Args: asset (nome/símbolo), vs? (usd|brl|eur, default usd), days? (1|7|30|90|180|365|max, default 30)"
+            ),
+            risk="MEDIUM",
+            fn=_crypto_market_chart,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
             name="papers.arxiv_search",
             description="Busca papers no arXiv (ATOM). Args: query, max_results? (default 5)",
             risk="MEDIUM",
@@ -1569,7 +1580,70 @@ _ASSET_ALIASES = {
     "solana": "solana",
     "usdt": "tether",
     "tether": "tether",
+    # Pi Network (best-effort id; pode variar conforme o CoinGecko)
+    "pi": "pi-network",
+    "pi network": "pi-network",
+    "pi-network": "pi-network",
 }
+
+
+def _coingecko_find_coin_id(asset_query: str) -> tuple[str | None, str | None]:
+    """Resolve um asset (nome/símbolo) para um coin id do CoinGecko (best-effort)."""
+
+    q = (asset_query or "").strip().lower()
+    if not q:
+        return None, "informe asset"
+
+    # Aliases explícitos primeiro.
+    if q in _ASSET_ALIASES:
+        return _ASSET_ALIASES[q], None
+
+    # Tenta direto (às vezes o usuário já passa o id).
+    direct = re.sub(r"\s+", "-", q).strip("-")
+    if 2 <= len(direct) <= 60:
+        # Não validamos aqui; o endpoint consumirá.
+        candidate = direct
+    else:
+        candidate = q
+
+    # Busca via /search
+    params = {"query": q}
+    data, err = _http_json(method="GET", url="https://api.coingecko.com/api/v3/search", params=params)
+    if err:
+        return None, err
+
+    coins = (data or {}).get("coins") if isinstance(data, dict) else None
+    if not isinstance(coins, list) or not coins:
+        return None, "asset não encontrado"
+
+    # Heurística simples de ranking.
+    qn = _normalize(q)
+    best_id: str | None = None
+    best_score = -1
+    for c in coins[:15]:
+        if not isinstance(c, dict):
+            continue
+        cid = str(c.get("id") or "").strip()
+        name = str(c.get("name") or "").strip()
+        sym = str(c.get("symbol") or "").strip()
+        if not cid:
+            continue
+
+        score = 0
+        if _normalize(cid) == qn or _normalize(name) == qn or _normalize(sym) == qn:
+            score += 50
+        if qn and qn in _normalize(name):
+            score += 10
+        if qn and qn in _normalize(cid):
+            score += 8
+        if qn and qn == _normalize(sym):
+            score += 12
+
+        if score > best_score:
+            best_score = score
+            best_id = cid
+
+    return best_id or candidate, None
 
 
 def _crypto_price(args: dict[str, Any]) -> ToolResult:
@@ -1583,17 +1657,112 @@ def _crypto_price(args: dict[str, Any]) -> ToolResult:
     if not vs:
         vs = "brl,usd"
 
-    params = {"ids": asset, "vs_currencies": vs}
+    # Resolve id (para evitar falhas em assets fora do alias list).
+    coin_id, id_err = _coingecko_find_coin_id(asset)
+    if id_err:
+        return ToolResult(status="error", error=id_err)
+    assert coin_id is not None
+
+    params = {"ids": coin_id, "vs_currencies": vs}
     data, err = _http_json(method="GET", url="https://api.coingecko.com/api/v3/simple/price", params=params)
     if err:
         return ToolResult(status="error", error=err)
 
-    price = (data or {}).get(asset)
+    price = (data or {}).get(coin_id)
     if not isinstance(price, dict) or not price:
         return ToolResult(status="error", error="asset não encontrado")
 
-    out = {"asset": asset, "vs": vs.split(","), "price": price}
+    out = {"asset": asset_raw, "coin_id": coin_id, "vs": vs.split(","), "price": price}
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _crypto_market_chart(args: dict[str, Any]) -> ToolResult:
+    asset_raw = str(args.get("asset", "") or "").strip()
+    if not asset_raw:
+        return ToolResult(status="error", error="informe asset (ex: pi network|bitcoin|eth)")
+
+    vs = str(args.get("vs", "usd") or "usd").strip().lower() or "usd"
+    if vs not in {"usd", "brl", "eur"}:
+        vs = "usd"
+
+    days = str(args.get("days", "30") or "30").strip().lower() or "30"
+    allowed_days = {"1", "7", "30", "90", "180", "365", "max"}
+    if days not in allowed_days:
+        # Aceita ints arbitrários também (CoinGecko permite números)
+        try:
+            di = int(days)
+            if di < 1:
+                di = 1
+            if di > 3650:
+                di = 3650
+            days = str(di)
+        except Exception:
+            days = "30"
+
+    coin_id, id_err = _coingecko_find_coin_id(asset_raw)
+    if id_err:
+        return ToolResult(status="error", error=id_err)
+    assert coin_id is not None
+
+    url = f"https://api.coingecko.com/api/v3/coins/{quote(coin_id)}/market_chart"
+    params = {"vs_currency": vs, "days": days}
+    data, err = _http_json(method="GET", url=url, params=params)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    prices = (data or {}).get("prices") if isinstance(data, dict) else None
+    if not isinstance(prices, list) or len(prices) < 2:
+        return ToolResult(status="error", error="sem dados de preços")
+
+    series: list[tuple[float, float]] = []
+    for p in prices:
+        try:
+            if isinstance(p, list) and len(p) >= 2:
+                ts = float(p[0])
+                val = float(p[1])
+                series.append((ts, val))
+        except Exception:
+            continue
+
+    if len(series) < 2:
+        return ToolResult(status="error", error="sem dados válidos")
+
+    vals = [v for _, v in series]
+    first = vals[0]
+    last = vals[-1]
+    lo = min(vals)
+    hi = max(vals)
+    pct = None
+    if first and first != 0.0:
+        pct = (last - first) / first * 100.0
+
+    # Texto enxuto (para o usuário) + payload estruturado (para automação).
+    lines: list[str] = []
+    lines.append(f"Asset: {asset_raw} (CoinGecko id: {coin_id})")
+    lines.append(f"Período: {days}d | moeda: {vs.upper()} | pontos: {len(series)}")
+    lines.append(f"Preço inicial: {first:.6g} | final: {last:.6g}")
+    if pct is not None:
+        lines.append(f"Variação no período: {pct:+.2f}%")
+    lines.append(f"Mín: {lo:.6g} | Máx: {hi:.6g}")
+    lines.append("Fonte: https://www.coingecko.com/")
+
+    out = {
+        "asset": asset_raw,
+        "coin_id": coin_id,
+        "vs": vs,
+        "days": days,
+        "points": len(series),
+        "first": first,
+        "last": last,
+        "low": lo,
+        "high": hi,
+        "pct_change": pct,
+    }
+
+    text = "\n".join(lines)
+    # Inclui JSON compactado no final (útil para debug sem depender do LLM).
+    text += "\n\nJSON:\n" + json.dumps(out, ensure_ascii=False)
+    return ToolResult(status="ok", output=text)
 
 
 def _arxiv_search(args: dict[str, Any]) -> ToolResult:

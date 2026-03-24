@@ -17,6 +17,7 @@ import re
 import unicodedata
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote_plus
 
 from omniscia.core.config import Settings
 from omniscia.core.tools import ToolRegistry
@@ -252,7 +253,7 @@ def route(settings: Settings, user_message: str) -> Plan:
 
     # Prefer deterministic heuristics whenever they match.
     # This improves UX (no latency/quota) and avoids LLM hallucinations.
-    heuristic = _route_heuristic(user_message)
+    heuristic = _route_heuristic(user_message, context_messages=None)
     if heuristic.intent in _DETERMINISTIC_INTENTS:
         return heuristic
 
@@ -286,7 +287,7 @@ def route_with_registry(
         msg = user_message.strip()
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
 
-    heuristic = _route_heuristic(user_message)
+    heuristic = _route_heuristic(user_message, context_messages=context_messages)
 
     # Se a heuristic escolheu tools que não existem neste runtime, devolvemos orientação.
     # (isso acontece quando dependências opcionais não foram instaladas)
@@ -391,8 +392,19 @@ def route_llm(
     def _asked_for_dev_exec(n: str) -> bool:
         return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
 
+    def _asked_for_web_or_data(n: str) -> bool:
+        # Só permitimos web/public APIs quando o usuário pedir explicitamente.
+        # Isso evita buscas automáticas que geram captcha/blocks e melhora a UX.
+        return bool(
+            re.search(
+                r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|verifique|veja|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b",
+                n,
+            )
+        )
+
     asked_screen_or_gui = _asked_for_screen_or_gui(norm)
     asked_dev = _asked_for_dev_exec(norm)
+    asked_web = _asked_for_web_or_data(norm)
 
     def _has_forbidden_tools(p: Plan) -> bool:
         for c in p.tool_calls:
@@ -402,6 +414,11 @@ def route_llm(
                     return True
             if name.startswith("dev.") and not asked_dev:
                 return True
+            if name.startswith("web.") and not asked_web:
+                return True
+            # Public API tools (read-only) também só quando solicitado.
+            if name.startswith(("knowledge.", "data.", "finance.", "news.", "papers.", "geo.", "time.")) and not asked_web:
+                return True
         return False
 
     if _has_forbidden_tools(plan):
@@ -409,6 +426,7 @@ def route_llm(
         no_tools_msg = (
             user_message
             + "\n\nIMPORTANTE: o usuário NÃO pediu para ver/clicar na tela nem executar comandos. "
+            + "Também NÃO pediu pesquisa/consulta na web/APIs. "
             + "Responda APENAS com orientação em texto, tool_calls=[] e risk=LOW."
         )
         plan2 = _route_with_llm_messages(
@@ -443,7 +461,7 @@ def route_llm(
     return plan
 
 
-def _route_heuristic(user_message: str) -> Plan:
+def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
 
@@ -461,6 +479,72 @@ def _route_heuristic(user_message: str) -> Plan:
                 "ou diga explicitamente: 'pode executar agora' depois de colocar o PDF em foco."
             ),
         )
+
+    def _infer_subject_from_context(ctx: list[dict[str, str]] | None) -> str | None:
+        """Tenta inferir o assunto/entidade recente (best-effort).
+
+        Ex.: após "você conhece a moeda PI Network?", um pedido "o gráfico da moeda"
+        deve virar "Pi Network gráfico" ao pesquisar.
+        """
+
+        if not ctx:
+            return None
+
+        # Procura de trás para frente por menções explícitas.
+        for m in reversed(ctx[-12:]):
+            text = str(m.get("content") or "").strip()
+            if not text:
+                continue
+
+            if re.search(r"\bpi\s*network\b", text, flags=re.IGNORECASE):
+                return "Pi Network"
+
+            # Outras criptos comuns (bem simples; evita NER pesado).
+            for coin in ("Bitcoin", "Ethereum", "Solana", "Dogecoin", "Cardano", "XRP", "BNB"):
+                if re.search(rf"\b{re.escape(coin)}\b", text, flags=re.IGNORECASE):
+                    return coin
+
+            # Heurística: "moeda X" / "criptomoeda X".
+            mm = re.search(
+                r"\b(?:moeda|coin|cripto(?:moeda)?)\b\s+([A-Za-z0-9][A-Za-z0-9\-\._ ]{1,40})",
+                text,
+                flags=re.IGNORECASE,
+            )
+            if mm:
+                cand = (mm.group(1) or "").strip(" .,:;!?\"'")
+                if 2 <= len(cand) <= 40:
+                    return cand
+
+        return None
+
+    # Regra: perguntas de "o que é / você conhece" sobre um tema/cripto.
+    # Preferimos Wikipedia (API) ao invés de Google/Playwright (menos bloqueios/captcha).
+    if re.search(r"\b(conhece|conhecer|o\s+que\s+e|oque\s+e|o\s+que\s+é|me\s+fale\s+sobre|fala\s+sobre|explique)\b", norm):
+        if re.search(r"\bpi\s*network\b", norm):
+            return Plan(
+                intent="knowledge.wikipedia_summary",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"query": "Pi Network", "lang": "pt"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar um resumo confiável (Wikipedia).",
+            )
+
+    # Regra: estudar/analisar gráfico de cripto (sem navegador).
+    if re.search(r"\b(grafico|gr[aá]fico|chart)\b", norm) and re.search(r"\b(estude|estudar|analise|analisar|verifique|veja|mostre|estuda)\b", norm):
+        asset: str | None = None
+        if re.search(r"\bpi\s*network\b", norm):
+            asset = "pi network"
+        if asset is None:
+            # Tentativa: inferir assunto recente.
+            asset = _infer_subject_from_context(context_messages)
+        if asset is not None:
+            return Plan(
+                intent="finance.crypto_market_chart",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="finance.crypto_market_chart", args={"asset": asset, "vs": "usd", "days": "30"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou puxar dados históricos (CoinGecko) e resumir o gráfico.",
+            )
 
     def _guess_name_from_text(text: str) -> str | None:
         # quoted "Meu Projeto"
@@ -2357,6 +2441,57 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response="Ok, abri o YouTube no seu navegador.",
         )
 
+    # Regra: pesquisar no Google (abre no navegador padrão)
+    # Mantemos determinístico para funcionar mesmo sem LLM (quota/rate limit).
+    if re.search(r"\bgoogle\b", norm) and re.search(
+        r"\b(pesquise|pesquisa|procure|buscar|busque|verifique|veja|analise|abra|abre|abrir)\b",
+        norm,
+    ):
+        q: str | None = None
+
+        m = re.search(r"\bgoogle\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m:
+            q = (m.group(1) or "").strip()
+
+        if not q:
+            m = re.search(r"\b(?:no|na|em)\s+google\b\s*(?:sobre\s+)?(.+)$", msg, flags=re.IGNORECASE)
+            if m:
+                q = (m.group(1) or "").strip()
+
+        if not q:
+            # Remove boilerplate e usa o resto como query.
+            q2 = msg
+            q2 = re.sub(r"\b(?:no|na|em)\s+google\b", "", q2, flags=re.IGNORECASE)
+            q2 = re.sub(r"\b(por\s+favor|pfv|porfavor)\b", "", q2, flags=re.IGNORECASE)
+            q2 = re.sub(
+                r"\b(pesquise|pesquisa|procure|buscar|busque|verifique|veja|analise|abra|abre|abrir)\b",
+                "",
+                q2,
+                flags=re.IGNORECASE,
+            )
+            q = q2.strip(" \t\n\r.,;:!?-")
+
+        # Se ainda ficou genérico demais, tenta inferir assunto recente.
+        if not q or len(q) < 3 or _normalize(q) in {"grafico", "gráfico", "grafico de moeda", "gráfico de moeda", "moeda", "grafico da moeda", "gráfico da moeda"}:
+            subj = _infer_subject_from_context(context_messages)
+            if subj:
+                # Se o usuário mencionou gráfico, preserva isso.
+                if re.search(r"\b(grafico|gráfico|chart|price)\b", norm):
+                    q = f"{subj} gráfico"
+                else:
+                    q = subj
+            else:
+                q = q or "gráfico de moeda"
+
+        url = "https://www.google.com/search?q=" + quote_plus(q)
+        return Plan(
+            intent="os.open_url",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="os.open_url", args={"url": url})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou abrir uma pesquisa no Google no seu navegador.",
+        )
+
     # Regra: abrir calculadora do Windows
     if re.search(r"\b(calculadora|calculator|calc)\b", norm) and re.search(
         r"\b(abrir|abra|abre|open)\b", norm
@@ -3462,6 +3597,13 @@ def _route_with_llm_messages(
     except Exception as e:  # noqa: BLE001
         from omniscia.core.redact import redact_secrets
 
+        def _short_err(exc: Exception) -> str:
+            s = redact_secrets(str(exc))
+            s = re.sub(r"\s+", " ", s).strip()
+            if len(s) > 220:
+                s = s[:220] + "..."
+            return f"{type(exc).__name__}: {s}" if s else type(exc).__name__
+
         fb_provider = getattr(settings, "llm_fallback_provider", None)
         fb_model = getattr(settings, "llm_fallback_model", None)
         fb_key = getattr(settings, "llm_fallback_api_key", None)
@@ -3470,7 +3612,7 @@ def _route_with_llm_messages(
         if _has_llm_config_values(fb_provider, fb_model, fb_key):
             logger.warning(
                 "Falha no router LLM principal; tentando fallback (%s)",
-                redact_secrets(str(e)),
+                _short_err(e),
             )
             try:
                 fb_settings = Settings(
@@ -3484,14 +3626,14 @@ def _route_with_llm_messages(
                 )
                 return _call_router_llm(fb_settings)
             except Exception as e2:  # noqa: BLE001
-                logger.error(
+                logger.warning(
                     "Falha ao rotear via LLM (principal+fallback); caindo no heurístico (%s)",
-                    redact_secrets(str(e2)),
+                    _short_err(e2),
                 )
                 return None
 
-        logger.error(
+        logger.warning(
             "Falha ao rotear via LLM; caindo no heurístico (%s)",
-            redact_secrets(str(e)),
+            _short_err(e),
         )
         return None

@@ -121,7 +121,13 @@ class Settings:
     open_apps_json: str | None = None
 
     # Logs
-    log_level: str = "INFO"
+    log_level: str = "WARNING"
+
+    # UI (CLI)
+    # Por padrão, evitamos poluir o terminal com detalhes internos (plano/ReAct).
+    ui_show_plan: bool = False
+    ui_show_react_steps: bool = False
+    ui_show_tool_outputs: bool = True
 
     # Omega (confiabilidade)
     # - Mantém defaults conservadores; ativar via OMNI_OMEGA=true.
@@ -330,6 +336,10 @@ class Settings:
 
         log_level = os.getenv("OMNI_LOG_LEVEL", "INFO").strip() or "INFO"
 
+        ui_show_plan = _bool_env("OMNI_UI_SHOW_PLAN", False)
+        ui_show_react_steps = _bool_env("OMNI_UI_SHOW_REACT_STEPS", False)
+        ui_show_tool_outputs = _bool_env("OMNI_UI_SHOW_TOOL_OUTPUTS", True)
+
         omega_enabled = (os.getenv("OMNI_OMEGA", "false").strip().lower() == "true")
         retry_max_attempts = _int_env("OMNI_RETRY_MAX", 3 if omega_enabled else 1)
         retry_backoff_s = _float_env("OMNI_RETRY_BACKOFF_S", 0.35)
@@ -475,6 +485,9 @@ class Settings:
             open_apps_file=open_apps_file,
             open_apps_json=open_apps_json,
             log_level=log_level,
+            ui_show_plan=ui_show_plan,
+            ui_show_react_steps=ui_show_react_steps,
+            ui_show_tool_outputs=ui_show_tool_outputs,
             omega_enabled=omega_enabled,
             retry_max_attempts=retry_max_attempts,
             retry_backoff_s=retry_backoff_s,
