@@ -341,6 +341,14 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         except Exception:
             logger.info("OCR tools indisponíveis (erro ao importar/registrar).")
 
+    # Integrações (APIs públicas) — read-only
+    try:
+        from omniscia.modules.integrations.public_apis import register_public_api_tools
+
+        register_public_api_tools(registry)
+    except Exception:
+        logger.info("Public API tools indisponíveis (erro ao importar/registrar).")
+
     # Tools de jogos (ex.: T-Rex autoplay)
     try:
         from omniscia.modules.games.trex import register_game_tools

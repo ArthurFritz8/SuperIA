@@ -91,6 +91,89 @@ def route(settings: Settings, user_message: str) -> Plan:
         "edu.pdf_word_autofill",
         # Web read-only
         "web.get_page_text",
+        # Public API integrations (read-only)
+        "data.weather",
+        "finance.crypto_price",
+        "knowledge.wikipedia_summary",
+        "papers.arxiv_search",
+        "web.search",
+        "geo.geocode",
+        "geo.reverse_geocode",
+        "geo.route_osrm",
+        "finance.fx_convert",
+        "data.country_info",
+        "time.world_time",
+        "news.gdelt_search",
+        "books.openlibrary_search",
+        "calendar.holidays",
+        "papers.crossref_search",
+        "finance.fear_greed_index",
+        "science.earthquake_usgs",
+        "space.iss_position",
+        "health.covid_stats",
+        "knowledge.openalex_works_search",
+        "knowledge.wikidata_search",
+        "knowledge.wikidata_entity",
+        "data.worldbank_indicator",
+        "news.hackernews_front_page",
+        "code.github_repo_search",
+        "qa.stackexchange_search",
+        "language.dictionary_define",
+        "media.lyrics",
+        "fun.joke",
+        "fun.trivia",
+        "fun.pokemon_info",
+        "net.ip_info",
+        "people.random_user",
+        "fun.cat_fact",
+        "utils.qr_code_url",
+        "sec.osv_vuln",
+        "sec.osv_query",
+        "pkg.pypi_project",
+        "pkg.npm_package",
+        "pkg.cratesio_crate",
+        "net.dns_google_resolve",
+        "status.github",
+        "net.rdap_domain",
+        "net.rdap_ip",
+        "net.bgpview_ip",
+        "net.bgpview_asn",
+        "sec.crtsh_search",
+        "sec.cisa_kev_search",
+        "status.cloudflare",
+        "status.discord",
+        "net.ripestat_ip",
+        "net.ripestat_asn",
+        "net.peeringdb_asn",
+        "sec.urlhaus_url",
+        "sec.urlhaus_host",
+        "sec.threatfox_ioc_search",
+        "status.npm",
+        "status.openai",
+        "status.docker",
+        "sec.feodotracker_ip_blocklist",
+        "sec.hashlookup",
+        "status.atlassian",
+        "status.zoom",
+        "status.gitlab",
+        "space.spacex_latest_launch",
+        "archive.archiveorg_search",
+        "media.tvmaze_search",
+        "food.meal_search",
+        "edu.universities_search",
+        "people.agify_name",
+        "people.genderize_name",
+        "people.nationalize_name",
+        "fun.dog_image",
+        "anime.jikan_search",
+        "art.met_search",
+        "art.met_object",
+        "art.artic_search",
+        "chess.chesscom_player",
+        "chess.chesscom_stats",
+        "chess.chesscom_daily_puzzle",
+        "drink.openbrewerydb_search",
+        "fun.deck_draw",
         "win.focus_window",
         "discord.send_message",
         "jgrasp.create_java_program",
@@ -621,6 +704,1093 @@ def _route_heuristic(user_message: str) -> Plan:
             final_response=(
                 "Tirei uma captura de tela e salvei na Área de Trabalho." if (wants_desktop and wants_save) else "Tirei uma captura de tela."
             ),
+        )
+
+    # Regra: clima/tempo (Open-Meteo) — explícito
+    # Exemplos: "clima em São Paulo", "tempo em curitiba", "temperatura em recife"
+    m = re.search(r"\b(clima|tempo|temperatura)\b\s+em\s+(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        city = (m.group(2) or "").strip().strip("\"'")
+        if city:
+            return Plan(
+                intent="data.weather",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="data.weather_open_meteo", args={"city": city, "lang": "pt"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o clima atual (Open-Meteo).",
+            )
+
+    # Regra: preço de cripto (CoinGecko) — explícito
+    # Exemplos: "preço do bitcoin", "valor do btc", "preço do ethereum"
+    if re.search(r"\b(pre[cç]o|valor|cotac[aã]o)\b", norm) and re.search(r"\b(bitcoin|btc|ethereum|eth|solana|sol)\b", norm):
+        m2 = re.search(r"\b(bitcoin|btc|ethereum|eth|solana|sol)\b", norm)
+        asset = (m2.group(1) if m2 else "bitcoin")
+        return Plan(
+            intent="finance.crypto_price",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="finance.crypto_price", args={"asset": asset, "vs": "brl,usd"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o preço atual (CoinGecko).",
+        )
+
+    # Regra: Wikipedia — explícito
+    # Exemplos: "wikipedia: alan turing", "pesquise na wikipedia sobre redes neurais"
+    m = re.search(r"\b(wikipedia)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="knowledge.wikipedia_summary",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"title": q, "lang": "pt"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar um resumo na Wikipedia.",
+        )
+
+    m = re.search(r"\b(pesquise|pesquisa|procure|buscar|busque)\b.*\b(wikipedia)\b\s+(?:sobre\s+)?(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="knowledge.wikipedia_summary",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"title": q, "lang": "pt"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar um resumo na Wikipedia.",
+        )
+
+    # Regra: geocode (coordenadas) — explícito
+    # Exemplos: "coordenadas de São Paulo", "geocode: av paulista, sp"
+    m = re.search(r"\b(coordenadas\s+de|geocode)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="geo.geocode",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="geo.geocode", args={"query": q, "lang": "pt"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou localizar as coordenadas (OpenStreetMap).",
+        )
+
+    # Regra: reverse geocode — explícito
+    # Exemplos: "endereço de -23.55, -46.63", "reverse: -23.55 -46.63"
+    if ("endereco" in norm and " de " in norm) or ("reverse" in norm):
+        nums = re.findall(r"-?\d+(?:[\.,]\d+)?", msg)
+        if len(nums) >= 2:
+            try:
+                lat = float(nums[0].replace(",", "."))
+                lon = float(nums[1].replace(",", "."))
+            except Exception:
+                lat = None
+                lon = None
+            if lat is not None and lon is not None:
+                return Plan(
+                    intent="geo.reverse_geocode",
+                    user_message=msg,
+                    tool_calls=[ToolCall(tool_name="geo.reverse_geocode", args={"lat": lat, "lon": lon, "lang": "pt"})],
+                    risk=RiskLevel.MEDIUM,
+                    final_response="Ok — vou buscar o endereço aproximado (OpenStreetMap).",
+                )
+
+    # Regra: rota — explícito
+    # Exemplos: "rota de Campinas para São Paulo", "como ir de A para B"
+    m = re.search(r"\b(rota|como\s+ir)\b.*\b(de)\b\s+(.+?)\s+\b(para)\b\s+(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        origin = (m.group(3) or "").strip().strip("\"'")
+        dest = (m.group(5) or "").strip().strip("\"'")
+        if origin and dest:
+            return Plan(
+                intent="geo.route_osrm",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="geo.route_osrm", args={"from": origin, "to": dest, "profile": "driving", "lang": "pt"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou traçar uma rota (OSRM + OpenStreetMap).",
+            )
+
+    # Regra: conversão de moeda — explícito
+    # Exemplos: "converter 10 usd para brl", "converta 50 EUR para USD"
+    m = re.search(r"\b(converter|converta)\b\s+([\d\.,]+)\s*([A-Za-z]{3})\s+\bpara\b\s+([A-Za-z]{3})\b", msg, flags=re.IGNORECASE)
+    if m:
+        amount_s = (m.group(2) or "").strip().replace(",", ".")
+        cur_from = (m.group(3) or "").strip().upper()
+        cur_to = (m.group(4) or "").strip().upper()
+        try:
+            amount = float(amount_s)
+        except Exception:
+            amount = None
+        if amount is not None:
+            return Plan(
+                intent="finance.fx_convert",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="finance.fx_convert", args={"amount": amount, "from": cur_from, "to": cur_to})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou converter a moeda (Frankfurter/ECB).",
+            )
+
+    # Regra: info de país — explícito
+    # Exemplos: "país: brasil", "country: japan"
+    m = re.search(r"^\s*(pa[ií]s|country)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="data.country_info",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="data.country_info", args={"query": q})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar informações do país (RestCountries).",
+        )
+
+    # Regra: hora (WorldTimeAPI) — explícito
+    # Exemplos: "hora em America/Sao_Paulo", "time: UTC"
+    m = re.search(r"\b(hora\s+em|time)\b\s*[:\-]?\s*([A-Za-z_+\-/]+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        tz = (m.group(2) or "").strip()
+        # Pequeno atalho para BR.
+        if _normalize(tz) in {"brasilia", "brasil", "sao_paulo", "sao-paulo", "sao paulo"}:
+            tz = "America/Sao_Paulo"
+        return Plan(
+            intent="time.world_time",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="time.world_time", args={"tz": tz})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar a hora atual (WorldTimeAPI).",
+        )
+
+    # Regra: notícias (GDELT) — explícito
+    # Exemplos: "notícias sobre IA", "news: economia"
+    if "hacker news" not in norm:
+        m = re.search(r"\b(not[ií]cias\s+sobre|news)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip("\"'")
+            return Plan(
+                intent="news.gdelt_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="news.gdelt_search", args={"query": q, "max_results": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar notícias recentes (GDELT).",
+            )
+
+    # Regra: livros (OpenLibrary) — explícito
+    # Exemplos: "livro: senhor dos aneis", "book: clean code"
+    m = re.search(r"\b(livro|book)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="books.openlibrary_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="books.openlibrary_search", args={"query": q, "max_results": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar livros (OpenLibrary).",
+        )
+
+    # Regra: feriados (Nager.Date) — explícito
+    # Exemplos: "feriados 2026 BR", "feriados: 2025 US"
+    m = re.search(r"\bferiados\b\s*[:\-]?\s*(\d{4})\s+([A-Za-z]{2})\b", msg, flags=re.IGNORECASE)
+    if m:
+        try:
+            year = int(m.group(1) or 0)
+        except Exception:
+            year = 0
+        cc = (m.group(2) or "").strip().upper()
+        if year and cc:
+            return Plan(
+                intent="calendar.holidays",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="calendar.holidays", args={"year": year, "country_code": cc})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou listar feriados públicos (Nager.Date).",
+            )
+
+    # Regra: Crossref — explícito
+    # Exemplos: "crossref: transformers attention", "doi search: alan turing"
+    m = re.search(r"\b(crossref|doi\s+search)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip("\"'")
+        return Plan(
+            intent="papers.crossref_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="papers.crossref_search", args={"query": q, "rows": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar referências/DOIs (Crossref).",
+        )
+
+    # Regra: Fear & Greed — explícito
+    # Exemplos: "fear and greed", "medo e ganância"
+    if re.search(r"\b(fear\s*\&\s*greed|fear\s+and\s+greed|medo\s+e\s+gan[aâ]ncia|indice\s+de\s+medo)\b", norm):
+        return Plan(
+            intent="finance.fear_greed_index",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="finance.fear_greed_index", args={"limit": 1})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar o índice Fear & Greed.",
+        )
+
+    # Regra: ISS — explícito
+    # Exemplos: "onde está a ISS", "posição da iss"
+    if re.search(r"\biss\b", norm) and re.search(r"\b(onde|posi[cç][aã]o|localiza[cç][aã]o|agora|neste\s+momento)\b", norm):
+        return Plan(
+            intent="space.iss_position",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="space.iss_position", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar a posição atual da ISS.",
+        )
+
+    # Regra: terremotos (USGS) — explícito
+    # Exemplos: "terremotos últimos 7 dias", "sismos magnitude 5"
+    if re.search(r"\b(terremoto|terremotos|sismo|sismos|earthquake|earthquakes)\b", norm):
+        days = 7
+        m_days = re.search(r"\b(\d{1,2})\s*(dias|dia)\b", norm)
+        if m_days:
+            try:
+                days = int(m_days.group(1) or 7)
+            except Exception:
+                days = 7
+        min_mag = 4.5
+        m_mag = re.search(r"\b(mag(?:nitude)?|m)\s*(\d+(?:[\.,]\d+)?)\b", norm)
+        if m_mag:
+            try:
+                min_mag = float((m_mag.group(2) or "4.5").replace(",", "."))
+            except Exception:
+                min_mag = 4.5
+        return Plan(
+            intent="science.earthquake_usgs",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="science.earthquake_usgs", args={"days": days, "min_magnitude": min_mag, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou listar terremotos recentes (USGS).",
+        )
+
+    # Regra: COVID — explícito
+    # Exemplos: "covid no brasil", "covid global"
+    m = re.search(r"\b(covid)\b(?:\s+(no|na|em)\s+(.+))?$", msg, flags=re.IGNORECASE)
+    if m:
+        country = (m.group(3) or "").strip().strip('"\'')
+        args: dict[str, Any] = {}
+        if country and _normalize(country) not in {"mundo", "global", "geral"}:
+            args["country"] = country
+        return Plan(
+            intent="health.covid_stats",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="health.covid_stats", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar estatísticas de COVID.",
+        )
+
+    # Regra: OpenAlex — explícito
+    # Exemplos: "openalex: transformers", "papers openalex: diffusion models"
+    m = re.search(r"\b(openalex)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="knowledge.openalex_works_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="knowledge.openalex_works_search", args={"query": q, "max_results": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar works/papers no OpenAlex.",
+        )
+
+    # Regra: Wikidata entity — explícito
+    # Exemplos: "wikidata id: Q42", "entity: Q42"
+    m = re.search(r"\b(wikidata\s+id|entity)\b\s*[:\-]?\s*([PQ]\d+)\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        ent = (m.group(2) or "").strip().upper()
+        return Plan(
+            intent="knowledge.wikidata_entity",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="knowledge.wikidata_entity", args={"id": ent})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou baixar dados da entidade do Wikidata.",
+        )
+
+    # Regra: Wikidata search — explícito
+    # Exemplos: "wikidata: alan turing"
+    m = re.search(r"\b(wikidata)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="knowledge.wikidata_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="knowledge.wikidata_search", args={"query": q, "lang": "pt", "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar entidades no Wikidata.",
+        )
+
+    # Regra: World Bank indicator — explícito
+    # Exemplos: "worldbank: BR SP.POP.TOTL", "world bank: US NY.GDP.MKTP.CD 2010:2024"
+    m = re.search(r"\b(world\s*bank|worldbank)\b\s*[:\-]?\s*([A-Za-z]{2,3})\s+([A-Za-z0-9_\.]{3,40})(?:\s+(\d{4}:\d{4}|\d{4}))?$", msg, flags=re.IGNORECASE)
+    if m:
+        cc = (m.group(2) or "").strip().upper()
+        ind = (m.group(3) or "").strip().upper()
+        date = (m.group(4) or "").strip()
+        args: dict[str, Any] = {"country_code": cc, "indicator": ind}
+        if date:
+            args["date"] = date
+        return Plan(
+            intent="data.worldbank_indicator",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="data.worldbank_indicator", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o indicador no World Bank.",
+        )
+
+    # Regra: Hacker News (front page) — explícito
+    # Exemplos: "hacker news top", "hn front page"
+    if ("hacker news" in norm) or (re.search(r"\bhn\b", norm) and re.search(r"\b(top|front\s*page|front)\b", norm)):
+        return Plan(
+            intent="news.hackernews_front_page",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="news.hackernews_front_page", args={"limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar a front page do Hacker News.",
+        )
+
+    # Regra: GitHub Status — explícito
+    if re.search(r"\bgithub\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.github",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.github", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do GitHub.",
+        )
+
+    # Regra: Cloudflare Status — explícito
+    if re.search(r"\bcloudflare\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.cloudflare",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.cloudflare", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do Cloudflare.",
+        )
+
+    # Regra: Discord Status — explícito
+    if re.search(r"\bdiscord\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.discord",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.discord", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do Discord.",
+        )
+
+    # Regra: Docker Status — explícito
+    if re.search(r"\bdocker\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.docker",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.docker", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do Docker.",
+        )
+
+    # Regra: Atlassian Status — explícito
+    if re.search(r"\batlassian\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.atlassian",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.atlassian", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status da Atlassian.",
+        )
+
+    # Regra: Zoom Status — explícito
+    if re.search(r"\bzoom\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.zoom",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.zoom", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do Zoom.",
+        )
+
+    # Regra: GitLab Status — explícito
+    if re.search(r"\bgitlab\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.gitlab",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.gitlab", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do GitLab.",
+        )
+
+    # Regra: npm Status — explícito
+    if re.search(r"\bnpm\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.npm",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.npm", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status do npm.",
+        )
+
+    # Regra: OpenAI Status — explícito
+    if re.search(r"\bopen\s*ai\b|\bopenai\b", norm) and re.search(r"\bstatus\b", norm):
+        return Plan(
+            intent="status.openai",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="status.openai", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o status da OpenAI.",
+        )
+
+    # Regra: SpaceX latest launch — explícito
+    if re.search(r"\bspacex\b", norm) and re.search(r"\b(ultimo|latest|last)\b", norm) and re.search(
+        r"\b(lancamento|launch)\b", norm
+    ):
+        return Plan(
+            intent="space.spacex_latest_launch",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="space.spacex_latest_launch", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar o último lançamento da SpaceX.",
+        )
+
+    # Regra: Archive.org advancedsearch — explícito
+    m = re.search(r"\b(archive\s*\.\s*org|archive)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="archive.archiveorg_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="archive.archiveorg_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar no Archive.org.",
+        )
+
+    # Regra: TVMaze — explícito
+    m = re.search(r"\b(tv\s*maze|tvmaze)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="media.tvmaze_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="media.tvmaze_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar séries no TVMaze.",
+        )
+
+    # Regra: TheMealDB — explícito
+    m = re.search(r"\b(meal\s*db|mealdb|themealdb)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="food.meal_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="food.meal_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar receitas no TheMealDB.",
+        )
+
+    # Regra: Universities (Hipolabs) — explícito
+    # Exemplos: "universidades: usp", "universities: mit | country: united states"
+    m = re.search(r"\b(universities|universidade|universidades)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        country = None
+        m_country = re.search(r"\b(country|pa[ií]s)\b\s*:\s*(.+)$", q, flags=re.IGNORECASE)
+        if m_country:
+            country = (m_country.group(2) or "").strip().strip('"\'')
+            q = re.sub(r"\b(country|pa[ií]s)\b\s*:\s*.+$", "", q, flags=re.IGNORECASE).strip().rstrip("|;")
+        args: dict[str, Any] = {"name": q, "limit": 10}
+        if country:
+            args["country"] = country
+        return Plan(
+            intent="edu.universities_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="edu.universities_search", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar universidades.",
+        )
+
+    # Regra: Agify/Genderize/Nationalize — explícito
+    m = re.search(r"\bagify\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip('"\'')
+        cc = None
+        m_cc = re.search(r"\bcc\b\s*:\s*([A-Za-z]{2})\b", q)
+        if m_cc:
+            cc = (m_cc.group(1) or "").strip().upper()
+            q = re.sub(r"\bcc\b\s*:\s*[A-Za-z]{2}\b", "", q).strip().rstrip("|;")
+        args: dict[str, Any] = {"name": q}
+        if cc:
+            args["country_code"] = cc
+        return Plan(
+            intent="people.agify_name",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="people.agify_name", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou estimar idade provável (Agify).",
+        )
+
+    m = re.search(r"\bgenderize\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip('"\'')
+        cc = None
+        m_cc = re.search(r"\bcc\b\s*:\s*([A-Za-z]{2})\b", q)
+        if m_cc:
+            cc = (m_cc.group(1) or "").strip().upper()
+            q = re.sub(r"\bcc\b\s*:\s*[A-Za-z]{2}\b", "", q).strip().rstrip("|;")
+        args: dict[str, Any] = {"name": q}
+        if cc:
+            args["country_code"] = cc
+        return Plan(
+            intent="people.genderize_name",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="people.genderize_name", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou estimar gênero provável (Genderize).",
+        )
+
+    m = re.search(r"\bnationalize\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="people.nationalize_name",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="people.nationalize_name", args={"name": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou estimar nacionalidade provável (Nationalize).",
+        )
+
+    # Regra: imagem de cachorro — explícito
+    if re.search(r"\b(dog|cachorro)\b", norm) and re.search(r"\b(imagem|foto|image|pic)\b", norm):
+        return Plan(
+            intent="fun.dog_image",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.dog_image", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar uma imagem aleatória de cachorro.",
+        )
+
+    # Regra: Jikan (anime search) — explícito
+    m = re.search(r"\b(anime|jikan)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="anime.jikan_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="anime.jikan_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar animes (Jikan/MyAnimeList).",
+        )
+
+    # Regra: Met Museum — explícito
+    m = re.search(r"\bmet\b\s*(?:object|id)\b\s*[:\-]?\s*(\d+)\b", msg, flags=re.IGNORECASE)
+    if m:
+        oid = int(m.group(1))
+        return Plan(
+            intent="art.met_object",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="art.met_object", args={"object_id": oid})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar o item do Met Museum.",
+        )
+
+    m = re.search(r"\b(met\s*museum|metmuseum|met)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="art.met_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="art.met_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar no acervo do Met Museum.",
+        )
+
+    # Regra: Art Institute of Chicago — explícito
+    m = re.search(r"\b(artic|art\s+institute)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="art.artic_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="art.artic_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar obras no Art Institute of Chicago.",
+        )
+
+    # Regra: Chess.com — explícito
+    if re.search(r"\bchess\b", norm) and re.search(r"\b(puzzle|quebra\s*cabec|desafio)\b", norm):
+        return Plan(
+            intent="chess.chesscom_daily_puzzle",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="chess.chesscom_daily_puzzle", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar o puzzle diário do Chess.com.",
+        )
+
+    m = re.search(r"\bchess\b\s+stats\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        u = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="chess.chesscom_stats",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="chess.chesscom_stats", args={"username": u})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar os stats do jogador no Chess.com.",
+        )
+
+    m = re.search(r"\bchess\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        u = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="chess.chesscom_player",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="chess.chesscom_player", args={"username": u})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar o perfil do jogador no Chess.com.",
+        )
+
+    # Regra: Open Brewery DB — explícito
+    m = re.search(r"\b(brewery|breweries|cervejaria|cervejarias)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="drink.openbrewerydb_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="drink.openbrewerydb_search", args={"query": q, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar cervejarias (Open Brewery DB).",
+        )
+
+    # Regra: Deck of Cards — explícito
+    m = re.search(r"\b(deck|cards|cartas)\b\s*[:\-]\s*(\d{1,2})\b", msg, flags=re.IGNORECASE)
+    if m:
+        try:
+            n = int(m.group(2))
+        except Exception:
+            n = 5
+        return Plan(
+            intent="fun.deck_draw",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.deck_draw", args={"count": n})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou sacar cartas (Deck of Cards API).",
+        )
+
+    # Regra: GitHub repo search — explícito
+    # Exemplos: "github: agentic workflow", "github repo: typer rich"
+    m = re.search(r"\b(github)(?:\s+repo|\s+repos|\s+reposit[oó]rios?)?\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="code.github_repo_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="code.github_repo_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar repositórios no GitHub.",
+        )
+
+    # Regra: StackOverflow/StackExchange — explícito
+    # Exemplos: "stackoverflow: error list index out of range"
+    m = re.search(r"\b(stack\s*overflow|stackoverflow|stackexchange)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="qa.stackexchange_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="qa.stackexchange_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar perguntas relevantes no StackOverflow.",
+        )
+
+    # Regra: dicionário / definir palavra — explícito
+    # Exemplos: "dicionário: ephemeral", "defina recursion", "significado de latency"
+    m = re.search(r"\b(dicion[aá]rio|dictionary|defina|definir|significado)\b\s*(?:de\s+)?[:\-]?\s*([\w\-]{2,60})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        term = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="language.dictionary_define",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="language.dictionary_define", args={"term": term, "lang": "en"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar a definição no dicionário.",
+        )
+
+    # Regra: letras (lyrics) — explícito
+    # Exemplos: "letra: Queen - Bohemian Rhapsody", "lyrics: Adele - Hello"
+    m = re.search(r"\b(letra|lyrics)\b\s*[:\-]?\s*(.+?)\s*[-–]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m:
+        artist = (m.group(2) or "").strip().strip('"\'')
+        title = (m.group(3) or "").strip().strip('"\'')
+        if artist and title:
+            return Plan(
+                intent="media.lyrics",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="media.lyrics", args={"artist": artist, "title": title})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a letra da música.",
+            )
+
+    # Regra: piada — explícito
+    if re.search(r"\b(piada|joke)\b", norm):
+        return Plan(
+            intent="fun.joke",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.joke", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma piada.",
+        )
+
+    # Regra: trivia / quiz — explícito
+    if re.search(r"\b(trivia|quiz)\b", norm):
+        return Plan(
+            intent="fun.trivia",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.trivia", args={"amount": 5, "type": "multiple"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar perguntas de trivia.",
+        )
+
+    # Regra: Pokémon — explícito
+    # Exemplos: "pokemon: pikachu", "pokemon 25"
+    m = re.search(r"\b(pokemon|pok[eé]mon)\b\s*[:\-]?\s*([\w\-]{1,40})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        name_or_id = (m.group(2) or "").strip().lower()
+        return Plan(
+            intent="fun.pokemon_info",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.pokemon_info", args={"name_or_id": name_or_id})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar informações do Pokémon.",
+        )
+
+    # Regra: RIPEstat (network info) — explícito
+    # Exemplos: "ripestat ip: 8.8.8.8", "ripe stat asn: 15169"
+    m = re.search(r"\b(ripe\s*stat|ripestat)\b\s*(?:ip)?\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        ip = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.ripestat_ip",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.ripestat_ip", args={"ip": ip})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o RIPEstat para esse IP.",
+        )
+
+    m = re.search(r"\b(ripe\s*stat|ripestat)\b\s*(?:asn)?\s*[:\-]?\s*(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        asn = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.ripestat_asn",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.ripestat_asn", args={"asn": asn})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o RIPEstat para esse ASN.",
+        )
+
+    # Regra: IP info — explícito
+    # Exemplos: "meu ip", "ip: 8.8.8.8"
+    if re.search(r"\b(meu\s+ip|ip\s+p[úu]blico|ip\s+publico)\b", norm):
+        return Plan(
+            intent="net.ip_info",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.ip_info", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar informações do IP.",
+        )
+    # Evita conflito com comandos mais específicos (rdap/bgp).
+    if all(k not in norm for k in ("rdap", "whois", "bgp", "ripestat", "ripe stat")):
+        m = re.search(r"\bip\b\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            return Plan(
+                intent="net.ip_info",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.ip_info", args={"ip": (m.group(1) or "").strip()})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar informações do IP.",
+            )
+
+    # Regra: pessoa aleatória — explícito
+    # Exemplos: "pessoa aleatória", "random user"
+    if re.search(r"\b(pessoa\s+aleat[oó]ria|random\s+user)\b", norm):
+        return Plan(
+            intent="people.random_user",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="people.random_user", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou gerar uma pessoa aleatória.",
+        )
+
+    # Regra: cat fact — explícito
+    if re.search(r"\b(cat\s*fact|fato\s+de\s+gato|curiosidade\s+de\s+gato)\b", norm):
+        return Plan(
+            intent="fun.cat_fact",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.cat_fact", args={})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou pegar uma curiosidade sobre gatos.",
+        )
+
+    # Regra: QR code URL — explícito
+    # Exemplos: "qr: https://example.com", "qrcode: oi"
+    m = re.search(r"\b(qr\s*code|qrcode|qr)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        payload = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="utils.qr_code_url",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="utils.qr_code_url", args={"data": payload, "size": "200x200"})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou gerar uma URL de QR code.",
+        )
+
+    # Regra: OSV vuln by ID — explícito
+    # Exemplos: "cve-2024-1234", "GHSA-xxxx-xxxx-xxxx", "osv: OSV-2020-744"
+    # Guard: quando o usuário pede KEV explicitamente, isso deve ganhar do OSV.
+    m = re.search(r"\b(osv|vuln|vulnerability)\b\s*[:\-]?\s*([A-Za-z0-9\-\.]{6,80})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip() and not re.search(r"\b(cisa\s+kev|kev)\b", norm):
+        vid = (m.group(2) or "").strip().upper()
+        if re.fullmatch(r"(?:CVE|GHSA|OSV)[A-Z0-9\-\.]{4,76}", vid) or vid.startswith(("CVE-", "GHSA-", "OSV-")):
+            return Plan(
+                intent="sec.osv_vuln",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.osv_vuln", args={"id": vid})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar detalhes da vulnerabilidade (OSV.dev).",
+            )
+
+    m = re.search(r"\b(CVE-\d{4}-\d{3,10}|GHSA-[a-z0-9]{4}-[a-z0-9]{4}-[a-z0-9]{4}|OSV-\d{4}-\d+)\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip() and not re.search(r"\b(cisa\s+kev|kev)\b", norm):
+        vid = (m.group(1) or "").strip().upper()
+        return Plan(
+            intent="sec.osv_vuln",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.osv_vuln", args={"id": vid})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar detalhes da vulnerabilidade (OSV.dev).",
+        )
+
+    # Regra: OSV query por pacote+versão — explícito
+    # Formato simples: "osv: PyPI jinja2 3.1.4" | "osv npm express 4.18.2" | "osv crates tokio 1.35.1"
+    m = re.search(
+        r"\b(osv)\b\s*[:\-]?\s*(PyPI|pypi|pip|npm|node|crates(?:\.io)?|rust|RubyGems|rubygems|Maven|maven|NuGet|nuget|Go|go)\s+([^\s]{1,120})\s+([^\s]{1,60})\b",
+        msg,
+        flags=re.IGNORECASE,
+    )
+    if m:
+        eco = (m.group(2) or "").strip()
+        name = (m.group(3) or "").strip()
+        ver = (m.group(4) or "").strip()
+        return Plan(
+            intent="sec.osv_query",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.osv_query", args={"ecosystem": eco, "name": name, "version": ver, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou checar vulnerabilidades para essa versão (OSV.dev).",
+        )
+
+    # Regra: PyPI project — explícito
+    # Exemplos: "pypi: requests", "pip: fastapi"
+    m = re.search(r"\b(pypi|pip)\b\s*[:\-]?\s*([A-Za-z0-9_\.\-]{1,80})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        pkg = (m.group(2) or "").strip()
+        return Plan(
+            intent="pkg.pypi_project",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="pkg.pypi_project", args={"name": pkg})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar metadados do projeto no PyPI.",
+        )
+
+    # Regra: npm package — explícito
+    # Exemplos: "npm: express", "npm: @types/node"
+    m = re.search(r"\b(npm)\b\s*[:\-]?\s*([^\s]{1,160})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        pkg = (m.group(2) or "").strip()
+        return Plan(
+            intent="pkg.npm_package",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="pkg.npm_package", args={"name": pkg})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar metadados do pacote no npm registry.",
+        )
+
+    # Regra: crates.io crate — explícito
+    # Exemplos: "crates: tokio", "crates.io: serde"
+    m = re.search(r"\b(crates(?:\.io)?)\b\s*[:\-]?\s*([A-Za-z0-9_\-]{1,64})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        crate = (m.group(2) or "").strip()
+        return Plan(
+            intent="pkg.cratesio_crate",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="pkg.cratesio_crate", args={"name": crate})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar metadados do crate no crates.io.",
+        )
+
+    # Regra: DNS resolve — explícito
+    # Exemplos: "dns: example.com A", "resolve: example.com MX"
+    m = re.search(r"\b(dns|resolve)\b\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253})(?:\s+(A|AAAA|CNAME|MX|TXT))?$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        host = (m.group(2) or "").strip().strip('"\'').rstrip('.')
+        rtype = (m.group(3) or "A").strip().upper()
+        return Plan(
+            intent="net.dns_google_resolve",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.dns_google_resolve", args={"name": host, "type": rtype})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou resolver DNS via Google (DoH).",
+        )
+
+    # Regra: RDAP (whois moderno) — explícito
+    # Exemplos: "rdap domain: example.com", "whois: example.com"
+    m = re.search(r"\b(rdap\s+domain|rdap|whois)\b\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253}\.[A-Za-z]{2,24})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        domain = (m.group(2) or "").strip().strip('"\'').rstrip('.')
+        return Plan(
+            intent="net.rdap_domain",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.rdap_domain", args={"domain": domain})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar RDAP para esse domínio.",
+        )
+
+    m = re.search(r"\b(rdap\s+ip|whois\s+ip|rdap)\b\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        ip = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.rdap_ip",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.rdap_ip", args={"ip": ip})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar RDAP para esse IP.",
+        )
+
+    # Regra: PeeringDB — explícito
+    # Exemplos: "peeringdb asn: 15169", "peering db: 15169"
+    m = re.search(r"\b(peering\s*db|peeringdb)\b\s*[:\-]?\s*(?:asn\s*[:\-]?\s*)?(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        asn = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.peeringdb_asn",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.peeringdb_asn", args={"asn": asn})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o PeeringDB para esse ASN.",
+        )
+
+    # Regra: BGP/ASN (bgpview) — explícito
+    # Exemplos: "bgp ip: 8.8.8.8", "asn: 15169"
+    m = re.search(r"\b(bgp\s*ip|bgp)\b\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        ip = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.bgpview_ip",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.bgpview_ip", args={"ip": ip})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar dados BGP/ASN para esse IP.",
+        )
+
+    m = re.search(r"\b(asn|bgp\s*asn)\b\s*[:\-]?\s*(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        asn = (m.group(2) or "").strip()
+        return Plan(
+            intent="net.bgpview_asn",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="net.bgpview_asn", args={"asn": asn})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar informações desse ASN.",
+        )
+
+    # Regra: Certificate Transparency (crt.sh) — explícito
+    # Exemplos: "crtsh: example.com", "certificados: example.com"
+    m = re.search(r"\b(crt\s*sh|crtsh|certificados|certificates)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="sec.crtsh_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.crtsh_search", args={"query": q, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar certificados em CT (crt.sh).",
+        )
+
+    # Regra: URLhaus — explícito
+    # Exemplos: "urlhaus url: http://example.com/bad", "urlhaus host: example.com"
+    m = re.search(r"\burlhaus\b\s*(?:url)?\s*[:\-]?\s*(https?://\S+)\s*$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        u = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="sec.urlhaus_url",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.urlhaus_url", args={"url": u})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o URLhaus para essa URL.",
+        )
+
+    m = re.search(r"\burlhaus\b\s*(?:host|dom[íi]nio|domain)\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253})\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        host = (m.group(1) or "").strip().strip('"\'').rstrip('.')
+        return Plan(
+            intent="sec.urlhaus_host",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.urlhaus_host", args={"host": host})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar o URLhaus para esse host.",
+        )
+
+    # Regra: ThreatFox IOC — explícito
+    # Exemplos: "threatfox: 1.2.3.4", "threatfox ioc: abc"
+    m = re.search(r"\b(threat\s*fox|threatfox)\b\s*(?:ioc)?\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        ioc = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="sec.threatfox_ioc_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.threatfox_ioc_search", args={"ioc": ioc, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar esse IOC no ThreatFox.",
+        )
+
+    # Regra: Feodo Tracker (botnet C2 IP:porta) — explícito
+    # Exemplos: "feodotracker", "feodo tracker list"
+    if re.search(r"\bfeodo\b", norm) and re.search(r"\btracker\b", norm):
+        return Plan(
+            intent="sec.feodotracker_ip_blocklist",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.feodotracker_ip_blocklist", args={"limit": 20})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar a blocklist do Feodo Tracker.",
+        )
+
+    # Regra: Hashlookup (CIRCL) — explícito
+    # Exemplos: "hashlookup sha256: <hash>", "hash lookup: <sha1>"
+    if re.search(r"\bhash\s*lookup\b|\bhashlookup\b", norm):
+        algo = ""
+        if re.search(r"\bsha\s*256\b|\bsha256\b", norm):
+            algo = "sha256"
+        elif re.search(r"\bsha\s*1\b|\bsha1\b", norm):
+            algo = "sha1"
+        elif re.search(r"\bmd5\b", norm):
+            algo = "md5"
+
+        m = re.search(r"\b([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\b", msg)
+        if m and (m.group(1) or "").strip():
+            h = (m.group(1) or "").strip().lower()
+            if not algo:
+                algo = {32: "md5", 40: "sha1", 64: "sha256"}.get(len(h), "")
+            if algo:
+                return Plan(
+                    intent="sec.hashlookup",
+                    user_message=msg,
+                    tool_calls=[ToolCall(tool_name="sec.hashlookup", args={"algorithm": algo, "hash": h})],
+                    risk=RiskLevel.MEDIUM,
+                    final_response="Ok — vou consultar esse hash no Hashlookup (CIRCL).",
+                )
+
+    # Regra: CISA KEV — explícito
+    # Exemplos: "kev: CVE-2021-44228", "cisa kev log4j"
+    m = re.search(r"\b(cisa\s+kev|kev)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="sec.cisa_kev_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="sec.cisa_kev_search", args={"query": q, "limit": 10})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar no catálogo CISA KEV.",
         )
 
     # Regra: abrir Explorador / gerenciador de arquivos
