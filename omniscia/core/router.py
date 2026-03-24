@@ -174,6 +174,12 @@ def route(settings: Settings, user_message: str) -> Plan:
         "chess.chesscom_daily_puzzle",
         "drink.openbrewerydb_search",
         "fun.deck_draw",
+        "fun.xkcd_latest",
+        "fun.xkcd_comic",
+        "music.itunes_search",
+        "books.gutendex_search",
+        "data.openfoodfacts_search",
+        "pkg.npm_downloads_last_week",
         "win.focus_window",
         "discord.send_message",
         "jgrasp.create_java_program",
@@ -1366,6 +1372,74 @@ def _route_heuristic(user_message: str) -> Plan:
             tool_calls=[ToolCall(tool_name="fun.deck_draw", args={"count": n})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou sacar cartas (Deck of Cards API).",
+        )
+
+    # Regra: xkcd — explícito
+    m = re.search(r"\bxkcd\b\s*[:\-]\s*(\d{1,6})\b", msg, flags=re.IGNORECASE)
+    if m:
+        return Plan(
+            intent="fun.xkcd_comic",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="fun.xkcd_comic", args={"num": int(m.group(1))})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar essa tirinha do xkcd.",
+        )
+    if re.search(r"\bxkcd\b", norm):
+        if re.search(r"\b(latest|ultimo|u?ltimo|recente)\b", norm) or norm.strip() == "xkcd":
+            return Plan(
+                intent="fun.xkcd_latest",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.xkcd_latest", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a última tirinha do xkcd.",
+            )
+
+    # Regra: iTunes Search — explícito
+    m = re.search(r"\bitunes\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        q = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="music.itunes_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="music.itunes_search", args={"query": q, "media": "music", "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar no iTunes.",
+        )
+
+    # Regra: Gutendex / Gutenberg — explícito
+    m = re.search(r"\b(gutendex|gutenberg|project\s+gutenberg)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="books.gutendex_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="books.gutendex_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar livros no Project Gutenberg (Gutendex).",
+        )
+
+    # Regra: OpenFoodFacts — explícito
+    m = re.search(r"\b(open\s*food\s*facts|openfoodfacts|off)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(2) or "").strip():
+        q = (m.group(2) or "").strip().strip('"\'')
+        return Plan(
+            intent="data.openfoodfacts_search",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="data.openfoodfacts_search", args={"query": q, "limit": 5})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar produtos no OpenFoodFacts.",
+        )
+
+    # Regra: npm downloads — explícito
+    m = re.search(r"\bnpm\b\s+downloads\b\s*[:\-]\s*(@?[\w\-\.]+(?:/[\w\-\.]+)?)\b", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        pkg = (m.group(1) or "").strip()
+        return Plan(
+            intent="pkg.npm_downloads_last_week",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="pkg.npm_downloads_last_week", args={"package": pkg})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar downloads last-week do pacote no npm.",
         )
 
     # Regra: GitHub repo search — explícito

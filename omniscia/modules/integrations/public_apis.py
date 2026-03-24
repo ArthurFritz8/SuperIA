@@ -104,6 +104,14 @@ Mais APIs variadas (sem chave) — lote 2:
 - chess.chesscom_daily_puzzle (Chess.com — puzzle diário)
 - drink.openbrewerydb_search (Open Brewery DB — busca cervejarias)
 - fun.deck_draw (Deck of Cards — sacar cartas)
+
+Mais APIs variadas (sem chave) — lote 3:
+- fun.xkcd_latest (xkcd — última tirinha)
+- fun.xkcd_comic (xkcd — tirinha por número)
+- music.itunes_search (Apple iTunes Search API)
+- books.gutendex_search (Project Gutenberg via Gutendex)
+- data.openfoodfacts_search (OpenFoodFacts — busca produtos)
+- pkg.npm_downloads_last_week (npm downloads — last-week)
 """
 
 from __future__ import annotations
@@ -265,6 +273,16 @@ _ALLOWED_HOSTS = {
     "api.openbrewerydb.org",
     # Deck of Cards
     "deckofcardsapi.com",
+    # xkcd
+    "xkcd.com",
+    # iTunes Search
+    "itunes.apple.com",
+    # Gutendex (Project Gutenberg)
+    "gutendex.com",
+    # OpenFoodFacts
+    "world.openfoodfacts.org",
+    # npm downloads API
+    "api.npmjs.org",
 }
 
 
@@ -1011,6 +1029,60 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Saca cartas de um baralho novo. Args: count? (default 5)",
             risk="MEDIUM",
             fn=_deck_draw,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.xkcd_latest",
+            description="Última tirinha do xkcd. Args: (none)",
+            risk="MEDIUM",
+            fn=_xkcd_latest,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="fun.xkcd_comic",
+            description="Tirinha do xkcd por número. Args: num",
+            risk="MEDIUM",
+            fn=_xkcd_comic,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="music.itunes_search",
+            description="Busca músicas/podcasts/apps via iTunes Search API. Args: term|query, media? (music|podcast|all), limit? (default 5)",
+            risk="MEDIUM",
+            fn=_itunes_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="books.gutendex_search",
+            description="Busca livros do Project Gutenberg via Gutendex. Args: query, limit? (default 5)",
+            risk="MEDIUM",
+            fn=_gutendex_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="data.openfoodfacts_search",
+            description="Busca produtos no OpenFoodFacts. Args: query, limit? (default 5)",
+            risk="MEDIUM",
+            fn=_openfoodfacts_search,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="pkg.npm_downloads_last_week",
+            description="Downloads last-week de um pacote npm. Args: package",
+            risk="MEDIUM",
+            fn=_npm_downloads_last_week,
         )
     )
 
@@ -4058,5 +4130,236 @@ def _deck_draw(args: dict[str, Any]) -> ToolResult:
         "remaining": data.get("remaining"),
         "cards": slim,
         "source": "deckofcardsapi.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _xkcd_latest(args: dict[str, Any]) -> ToolResult:
+    data, err = _http_json(method="GET", url="https://xkcd.com/info.0.json", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {
+        "num": data.get("num"),
+        "title": data.get("title"),
+        "safe_title": data.get("safe_title"),
+        "alt": data.get("alt"),
+        "img": data.get("img"),
+        "day": data.get("day"),
+        "month": data.get("month"),
+        "year": data.get("year"),
+        "link": data.get("link"),
+        "source": "xkcd.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _xkcd_comic(args: dict[str, Any]) -> ToolResult:
+    try:
+        num = int(str(args.get("num", "") or "").strip())
+    except Exception:
+        num = 0
+    if num <= 0:
+        return ToolResult(status="error", error="informe num (ex: 353)")
+
+    data, err = _http_json(method="GET", url=f"https://xkcd.com/{num}/info.0.json", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {
+        "num": data.get("num") or num,
+        "title": data.get("title"),
+        "safe_title": data.get("safe_title"),
+        "alt": data.get("alt"),
+        "img": data.get("img"),
+        "day": data.get("day"),
+        "month": data.get("month"),
+        "year": data.get("year"),
+        "link": data.get("link"),
+        "source": "xkcd.com",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _itunes_search(args: dict[str, Any]) -> ToolResult:
+    term = str(args.get("term") or args.get("query") or "").strip()
+    if not term:
+        return ToolResult(status="error", error="informe term (ou query)")
+
+    media = str(args.get("media", "music") or "music").strip().lower()
+    if media not in {"music", "podcast", "movie", "all"}:
+        media = "music"
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    params: dict[str, Any] = {"term": term, "limit": limit}
+    if media != "all":
+        params["media"] = media
+
+    data, err = _http_json(method="GET", url="https://itunes.apple.com/search", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    results = data.get("results") if isinstance(data.get("results"), list) else []
+    slim: list[dict[str, Any]] = []
+    for r in results[:limit]:
+        if not isinstance(r, dict):
+            continue
+        slim.append(
+            {
+                "kind": r.get("kind") or r.get("wrapperType"),
+                "trackName": r.get("trackName") or r.get("collectionName"),
+                "artistName": r.get("artistName"),
+                "collectionName": r.get("collectionName"),
+                "releaseDate": r.get("releaseDate"),
+                "country": r.get("country"),
+                "trackViewUrl": r.get("trackViewUrl") or r.get("collectionViewUrl"),
+                "previewUrl": r.get("previewUrl"),
+            }
+        )
+
+    out = {"term": term, "media": (media if media != "all" else None), "count": len(slim), "results": slim, "source": "itunes.apple.com"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _gutendex_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    data, err = _http_json(method="GET", url="https://gutendex.com/books", params={"search": query, "page": 1}, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    items = data.get("results") if isinstance(data.get("results"), list) else []
+    slim: list[dict[str, Any]] = []
+    for b in items[:limit]:
+        if not isinstance(b, dict):
+            continue
+        authors = b.get("authors") if isinstance(b.get("authors"), list) else []
+        author_names = [a.get("name") for a in authors if isinstance(a, dict) and a.get("name")][:3]
+        languages = b.get("languages") if isinstance(b.get("languages"), list) else []
+        formats = b.get("formats") if isinstance(b.get("formats"), dict) else {}
+        best = formats.get("text/html") or formats.get("text/html; charset=utf-8") or formats.get("application/epub+zip") or formats.get("application/pdf")
+        slim.append(
+            {
+                "id": b.get("id"),
+                "title": b.get("title"),
+                "authors": author_names,
+                "languages": languages[:5],
+                "download_count": b.get("download_count"),
+                "link": best,
+            }
+        )
+
+    out = {"query": query, "count": len(slim), "results": slim, "source": "gutendex.com"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _openfoodfacts_search(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        limit = int(args.get("limit", 5) or 5)
+    except Exception:
+        limit = 5
+    if limit < 1:
+        limit = 1
+    if limit > 10:
+        limit = 10
+
+    params: dict[str, Any] = {
+        "search_terms": query,
+        "search_simple": 1,
+        "action": "process",
+        "json": 1,
+        "page_size": limit,
+        "page": 1,
+    }
+    data, err = _http_json(method="GET", url="https://world.openfoodfacts.org/cgi/search.pl", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    products = data.get("products") if isinstance(data.get("products"), list) else []
+    slim: list[dict[str, Any]] = []
+    for p in products[:limit]:
+        if not isinstance(p, dict):
+            continue
+        nutr = p.get("nutriments") if isinstance(p.get("nutriments"), dict) else {}
+        code = p.get("code")
+        url = f"https://world.openfoodfacts.org/product/{code}" if code else p.get("url")
+        slim.append(
+            {
+                "code": code,
+                "product_name": p.get("product_name") or p.get("product_name_pt"),
+                "brands": p.get("brands"),
+                "quantity": p.get("quantity"),
+                "nutriscore": p.get("nutriscore_grade"),
+                "energy_kcal_100g": nutr.get("energy-kcal_100g"),
+                "sugars_100g": nutr.get("sugars_100g"),
+                "fat_100g": nutr.get("fat_100g"),
+                "salt_100g": nutr.get("salt_100g"),
+                "url": url,
+            }
+        )
+
+    out = {"query": query, "count": len(slim), "results": slim, "source": "world.openfoodfacts.org"}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+def _npm_downloads_last_week(args: dict[str, Any]) -> ToolResult:
+    package = str(args.get("package", "") or "").strip()
+    if not package:
+        return ToolResult(status="error", error="informe package (ex: express)")
+
+    # npm package names can include scope: @scope/name
+    if len(package) > 214:
+        return ToolResult(status="error", error="package muito longo")
+
+    safe_pkg = package
+    if package.startswith("@") and "/" in package:
+        # API expects @scope%2Fname
+        safe_pkg = package.replace("/", "%2F")
+
+    data, err = _http_json(method="GET", url=f"https://api.npmjs.org/downloads/point/last-week/{safe_pkg}", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if not isinstance(data, dict):
+        return ToolResult(status="error", error="resposta inesperada")
+
+    out = {
+        "package": data.get("package") or package,
+        "downloads": data.get("downloads"),
+        "start": data.get("start"),
+        "end": data.get("end"),
+        "source": "api.npmjs.org",
     }
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))

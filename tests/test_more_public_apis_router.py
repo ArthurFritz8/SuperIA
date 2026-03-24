@@ -643,3 +643,51 @@ def test_deck_draw_route():
     assert plan.intent == "fun.deck_draw"
     assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.deck_draw"
     assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_xkcd_latest_route():
+    settings = Settings.load()
+    plan = route(settings, "xkcd")
+    assert plan.intent == "fun.xkcd_latest"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.xkcd_latest"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_xkcd_comic_route():
+    settings = Settings.load()
+    plan = route(settings, "xkcd: 353")
+    assert plan.intent == "fun.xkcd_comic"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "fun.xkcd_comic"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_itunes_search_route():
+    settings = Settings.load()
+    plan = route(settings, "itunes: beatles")
+    assert plan.intent == "music.itunes_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "music.itunes_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_gutendex_search_route():
+    settings = Settings.load()
+    plan = route(settings, "gutenberg: sherlock holmes")
+    assert plan.intent == "books.gutendex_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "books.gutendex_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_openfoodfacts_search_route():
+    settings = Settings.load()
+    plan = route(settings, "openfoodfacts: nutella")
+    assert plan.intent == "data.openfoodfacts_search"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "data.openfoodfacts_search"
+    assert plan.risk == RiskLevel.MEDIUM
+
+
+def test_npm_downloads_last_week_route():
+    settings = Settings.load()
+    plan = route(settings, "npm downloads: express")
+    assert plan.intent == "pkg.npm_downloads_last_week"
+    assert plan.tool_calls and plan.tool_calls[0].tool_name == "pkg.npm_downloads_last_week"
+    assert plan.risk == RiskLevel.MEDIUM
