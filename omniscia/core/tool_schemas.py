@@ -107,3 +107,10 @@ class FinanceDefiLlamaProtocolsArgs(ToolArgsBase):
 
 class FinanceDefiLlamaProtocolArgs(ToolArgsBase):
     slug: str = Field(min_length=1)
+
+
+class CryptoIntelReportArgs(ToolArgsBase):
+    mode: Literal["airdrops", "memecoins", "both"] = "both"
+    chain: str | None = None
+    query: str | None = None
+    limit: int = Field(default=15, ge=5, le=25)

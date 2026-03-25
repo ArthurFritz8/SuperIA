@@ -43,6 +43,7 @@ from omniscia.core.chat_llm import warmup_llm_best_effort
 from omniscia.core.chat_llm import chat_reply_async
 from omniscia.core.tool_runner import ToolRunner
 from omniscia.core.tool_schemas import (
+    CryptoIntelReportArgs,
     DevExecArgs,
     EduPdfWordAutofillArgs,
     FinanceDefiLlamaProtocolArgs,
@@ -115,6 +116,7 @@ def build_brain_context(settings: Settings, *, console: Console) -> BrainContext
     runner.register_schema("finance.dexscreener_chain_discovery", FinanceDexScreenerChainDiscoveryArgs)
     runner.register_schema("finance.defillama_protocols", FinanceDefiLlamaProtocolsArgs)
     runner.register_schema("finance.defillama_protocol", FinanceDefiLlamaProtocolArgs)
+    runner.register_schema("crypto.intel_report", CryptoIntelReportArgs)
     # Settings é frozen; anexamos via setattr controlado para evitar mudar API pública.
     object.__setattr__(settings, "_tool_runner", runner)
     profile_store = UserProfileStore()

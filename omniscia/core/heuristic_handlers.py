@@ -1783,6 +1783,43 @@ class CryptoIntelHandlers:
     def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
         msg = user_message.strip()
 
+        # Relatório agregado (tool única)
+        if re.search(r"\b(relat[oó]rio|report|intel)\b", norm, flags=re.IGNORECASE) and re.search(
+            r"\b(cripto|crypto|airdrop|airdrops|memecoin|memecoins)\b",
+            norm,
+            flags=re.IGNORECASE,
+        ):
+            mode = "both"
+            if re.search(r"\bairdrop\b|\bairdrops\b", norm, flags=re.IGNORECASE) and not re.search(
+                r"\bmemecoin\b|\bmemecoins\b", norm, flags=re.IGNORECASE
+            ):
+                mode = "airdrops"
+            elif re.search(r"\bmemecoin\b|\bmemecoins\b", norm, flags=re.IGNORECASE) and not re.search(
+                r"\bairdrop\b|\bairdrops\b", norm, flags=re.IGNORECASE
+            ):
+                mode = "memecoins"
+
+            chain = None
+            if re.search(r"\bsolana\b|\bsol\b", norm):
+                chain = "solana"
+            elif re.search(r"\bbase\b", norm):
+                chain = "base"
+            elif re.search(r"\beth\b|\bethereum\b", norm):
+                chain = "ethereum"
+
+            return Plan(
+                intent="crypto.intel_report",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="crypto.intel_report",
+                        args={"mode": mode, "chain": chain, "query": None, "limit": 15},
+                    )
+                ],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou gerar um relatório agregado (multi-fonte).",
+            )
+
         # Airdrops / farming / campanhas
         if re.search(r"\b(airdrop|airdrops|farming|retroativo|retroactive)\b", norm, flags=re.IGNORECASE):
             q = msg

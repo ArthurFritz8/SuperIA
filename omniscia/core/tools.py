@@ -97,6 +97,176 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
 
     registry = ToolRegistry()
 
+    def tool_crypto_intel_report(args: dict[str, Any]) -> ToolResult:
+        """Gera um relatório agregando fontes de cripto (safe-only).
+
+        Não faz nenhuma ação com carteira, assinatura, claim, downloads ou automações perigosas.
+
+        Args:
+            mode: "airdrops" | "memecoins" | "both"
+            chain: optional (ex: solana|ethereum|base)
+            query: optional freeform (refina web.search)
+            limit: itens por fonte (default 15)
+        """
+
+        mode = str(args.get("mode") or "both").strip().lower() or "both"
+        if mode not in {"airdrops", "memecoins", "both"}:
+            mode = "both"
+        chain = str(args.get("chain") or "").strip().lower() or None
+        query = str(args.get("query") or "").strip() or None
+        try:
+            limit = int(args.get("limit") or 15)
+        except Exception:  # noqa: BLE001
+            limit = 15
+        limit = max(5, min(limit, 25))
+
+        results: list[dict[str, Any]] = []
+        sources: list[str] = []
+
+        def _safe_json_load(tr: ToolResult) -> Any:
+            if tr.status != "ok":
+                return None
+            try:
+                return json.loads(tr.output or "")
+            except Exception:
+                return None
+
+        # 1) Memecoins / DEX discovery
+        if mode in {"memecoins", "both"}:
+            if chain:
+                r = registry.run(
+                    "finance.dexscreener_chain_discovery",
+                    {"chain": chain, "limit": limit},
+                )
+            else:
+                r = registry.run(
+                    "finance.dexscreener_search",
+                    {"query": "memecoin", "limit": limit},
+                )
+            payload = _safe_json_load(r)
+            if isinstance(payload, dict):
+                for p in payload.get("results") or []:
+                    if isinstance(p, dict):
+                        results.append({"kind": "dex_pair", "source": "dexscreener", **p})
+                sources.append("dexscreener")
+
+        # 2) Airdrops / DeFi protocols (sinais)
+        if mode in {"airdrops", "both"}:
+            r = registry.run("finance.defillama_protocols", {"limit": min(25, max(10, limit))})
+            payload = _safe_json_load(r)
+            if isinstance(payload, dict):
+                for p in payload.get("results") or []:
+                    if isinstance(p, dict):
+                        results.append({"kind": "defi_protocol", "source": "defillama", **p})
+                sources.append("defillama")
+
+        # 3) Web search para complementar (links e contexto)
+        web_queries: list[str] = []
+        if query:
+            web_queries.append(query)
+        if mode in {"airdrops", "both"}:
+            web_queries.append("airdrops active eligibility")
+        if mode in {"memecoins", "both"}:
+            web_queries.append("memecoin pre launch stealth launch")
+        if chain:
+            web_queries = [f"{q} {chain}" for q in web_queries]
+
+        web_items: list[dict[str, Any]] = []
+        for q in web_queries[:3]:
+            r = registry.run("web.search", {"query": q, "max_results": 6})
+            payload = _safe_json_load(r)
+            if isinstance(payload, dict):
+                for it in payload.get("results") or []:
+                    if isinstance(it, dict):
+                        web_items.append({"kind": "web_result", "source": "web.search", **it})
+        if web_items:
+            sources.append("web.search")
+
+        # Dedupe simples por url/pairAddress/slug
+        seen: set[str] = set()
+        deduped: list[dict[str, Any]] = []
+
+        def _key(it: dict[str, Any]) -> str:
+            url = str(it.get("url") or "").strip()
+            if url:
+                return f"url:{url}"
+            if it.get("pairAddress"):
+                return f"pair:{it.get('chainId')}:{it.get('pairAddress')}"
+            if it.get("slug"):
+                return f"slug:{it.get('slug')}"
+            name = str(it.get("name") or "").strip().lower()
+            if name:
+                return f"name:{name}"
+            return json.dumps(it, sort_keys=True, ensure_ascii=False)[:200]
+
+        for it in results + web_items:
+            if not isinstance(it, dict):
+                continue
+            k = _key(it)
+            if k in seen:
+                continue
+            seen.add(k)
+            deduped.append(it)
+
+        # Scoring best-effort (não é recomendação financeira)
+        def _score(it: dict[str, Any]) -> float:
+            s = 0.0
+            if it.get("source") == "defillama":
+                try:
+                    s += float(it.get("tvl") or 0.0) / 1_000_000.0
+                except Exception:
+                    pass
+                if it.get("github"):
+                    s += 5.0
+                if it.get("twitter"):
+                    s += 2.0
+            if it.get("source") == "dexscreener":
+                liq = (it.get("liquidity") or {}).get("usd") if isinstance(it.get("liquidity"), dict) else None
+                try:
+                    if liq is not None:
+                        s += float(liq) / 50_000.0
+                except Exception:
+                    pass
+                if it.get("fdv"):
+                    s += 1.0
+            if it.get("source") == "web.search":
+                # muito fraco — só para ordenar levemente
+                s += 0.1
+            return s
+
+        deduped.sort(key=_score, reverse=True)
+
+        # Monta saída
+        lines: list[str] = []
+        lines.append("== Crypto Intel Report ==")
+        lines.append(f"mode={mode} | chain={(chain or '')} | limit={limit}")
+        if query:
+            lines.append(f"query={query}")
+        lines.append("\nFontes usadas: " + ", ".join(sorted(set(sources))) if sources else "\nFontes usadas: (nenhuma)")
+        lines.append(
+            "\nAviso: isto é agregação de sinais públicos; NÃO é recomendação financeira e NÃO executa ações de carteira/claim."
+        )
+
+        top = deduped[: max(10, limit)]
+        for i, it in enumerate(top, start=1):
+            kind = str(it.get("kind") or "item")
+            src = str(it.get("source") or "")
+            title = str(it.get("name") or it.get("pairAddress") or it.get("title") or "").strip()
+            url = str(it.get("url") or "").strip()
+            lines.append(f"\n{i}. [{kind}] ({src}) {title}")
+            if url:
+                lines.append(f"   {url}")
+
+        payload = {
+            "mode": mode,
+            "chain": chain,
+            "query": query,
+            "sources": sorted(set(sources)),
+            "items": top,
+        }
+        text = "\n".join(lines)
+        text += "\n\nJSON:\n" + json.dumps(payload, ensure_ascii=False)
+        return ToolResult(status="ok", output=text)
     def tool_echo(args: dict[str, Any]) -> ToolResult:
         text = str(args.get("text", ""))
         return ToolResult(status="ok", output=text)
@@ -772,6 +942,19 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
         register_public_api_tools(registry)
     except Exception:
         logger.info("Public API tools indisponíveis (erro ao importar/registrar).")
+
+    # Crypto Intel (agregador local) — read-only (safe-only)
+    registry.register(
+        ToolSpec(
+            name="crypto.intel_report",
+            description=(
+                "Relatório agregado (safe-only) sobre airdrops/memecoins usando fontes públicas. "
+                "Args: mode (airdrops|memecoins|both), chain? (solana|ethereum|base), query?, limit?"
+            ),
+            risk="MEDIUM",
+            fn=tool_crypto_intel_report,
+        )
+    )
 
     # Tools de jogos (ex.: T-Rex autoplay)
     try:
