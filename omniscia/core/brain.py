@@ -93,8 +93,8 @@ def run_brain_loop(settings: Settings) -> None:
     approvals = ApprovalStore(getattr(settings, "hitl_approvals_path", "data/hitl_approvals.json"))
     try:
         approvals.load()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Falha ao carregar approvals (seguindo sem persistência): %s", exc)
     stt = build_stt(settings, console=console)
     tts = build_tts(settings, console=console)
 
@@ -102,8 +102,8 @@ def run_brain_loop(settings: Settings) -> None:
     policy = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
     try:
         policy.load()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Falha ao carregar policy (seguindo com defaults): %s", exc)
 
     # Snapshots + runlog (observabilidade)
     snapshot_mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
@@ -194,8 +194,8 @@ def run_brain_loop(settings: Settings) -> None:
         if (os.getenv("OMNI_LLM_WARMUP", "true").strip().lower() != "false"):
             blocking = (os.getenv("OMNI_LLM_WARMUP_BLOCKING", "true").strip().lower() != "false")
             warmup_llm_best_effort(settings, blocking=blocking)
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Warmup do LLM falhou (best-effort): %s", exc)
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 

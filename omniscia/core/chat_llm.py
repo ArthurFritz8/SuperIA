@@ -106,15 +106,16 @@ def warmup_llm_best_effort(settings: Settings, *, blocking: bool = False) -> Non
             for m in models:
                 try:
                     completion(model=str(m), messages=msgs, temperature=0.0, max_tokens=max_tokens, **base_kwargs)
-                except Exception:
+                except Exception as exc:  # noqa: BLE001
                     # warmup é best-effort
-                    pass
+                    logger.debug("Warmup falhou para model=%s: %s", str(m), redact_secrets(str(exc)))
 
         if blocking:
             _run()
         else:
             threading.Thread(target=_run, daemon=True).start()
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Warmup indisponível (best-effort): %s", redact_secrets(str(exc)))
         return
 
 

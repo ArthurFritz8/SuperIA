@@ -17,10 +17,12 @@ import os
 import re
 import unicodedata
 from datetime import datetime
+from collections import OrderedDict
 from typing import Any
 from urllib.parse import quote_plus
 
 from omniscia.core.config import Settings
+from omniscia.core.heuristic_handlers import run_heuristic_handlers
 from omniscia.core.tools import ToolRegistry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 
@@ -33,6 +35,81 @@ def _env_int(name: str, default: int) -> int:
         return v if v > 0 else default
     except Exception:
         return default
+
+
+class _LRUCache:
+    def __init__(self, max_items: int) -> None:
+        self.max_items = max(0, int(max_items or 0))
+        self._data: "OrderedDict[str, Plan]" = OrderedDict()
+
+    def get(self, key: str) -> Plan | None:
+        if not self.max_items:
+            return None
+        try:
+            val = self._data.pop(key)
+        except KeyError:
+            return None
+        self._data[key] = val
+        # Retorna cópia para evitar mutação acidental
+        try:
+            return val.model_copy(deep=True)
+        except Exception:
+            return val
+
+    def put(self, key: str, value: Plan) -> None:
+        if not self.max_items:
+            return
+        if key in self._data:
+            try:
+                self._data.pop(key)
+            except KeyError:
+                pass
+        self._data[key] = value
+        while len(self._data) > self.max_items:
+            self._data.popitem(last=False)
+
+
+_HEURISTIC_CACHE = _LRUCache(_env_int("OMNI_HEURISTIC_ROUTE_CACHE", 512))
+_LLM_ROUTE_CACHE = _LRUCache(_env_int("OMNI_LLM_ROUTE_CACHE", 128))
+
+
+def _registry_fingerprint(registry: ToolRegistry | None) -> str:
+    if registry is None:
+        return "-"
+    try:
+        names = sorted([t.name for t in registry.list() if getattr(t, "name", None)])
+        if not names:
+            return "0"
+        # fingerprint simples e barato: tamanho + bordas
+        return f"{len(names)}:{names[0]}:{names[-1]}"
+    except Exception:
+        return "?"
+
+
+# Regex precompiladas (hot-path)
+# Motivação: evitar recompilar dezenas de padrões a cada mensagem.
+_RE_GUI_EXPLICIT = re.compile(
+    r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite|aperta|apertar|pressione|pressionar)\b"
+)
+_RE_SCREEN_EXPLICIT = re.compile(
+    r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b"
+)
+_RE_IMPERATIVE = re.compile(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b")
+_RE_SCREEN_WORD = re.compile(r"\b(tela|screen)\b")
+_RE_DEV_EXPLICIT = re.compile(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell)\b")
+_RE_WEB_EXPLICIT = re.compile(
+    r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b"
+)
+_RE_GREETING_FULL = re.compile(
+    r"(oi|ola|opa|eai|e\s*ai|salve|bom\s+dia|boa\s+tarde|boa\s+noite)(\s+tudo\s+bem)?[!.?]*"
+)
+_RE_OS_VERBS = re.compile(r"\b(abrir|abra|abre|open|fechar|feche|fecha|close)\b")
+_RE_URL = re.compile(r"\bhttps?://\S+\b")
+_RE_WWW = re.compile(r"\bwww\.[^\s]+\b")
+_RE_DISCORD_MSG_HINT = re.compile(r"\b(mensagem|msg|chat)\b")
+_RE_JGRASP_WORD = re.compile(r"\bjgrasp\b")
+_RE_BUILD_VERB = re.compile(r"\b(crie|criar|escreva|escrever|gere|gerar|fa[cç]a|faca|implemente|implementar|compile|compilar)\b")
+_PROGRAMMING_HINT = re.compile(r"\b(jgrasp|java|python|javascript|typescript|c\+\+|c#|csharp|html|css)\b")
 
 
 _DETERMINISTIC_INTENTS: set[str] = {
@@ -270,39 +347,31 @@ def _looks_like_chat_message(norm: str) -> bool:
         return True
 
     # Pedidos explícitos de GUI (cliques/teclado).
-    if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite|aperta|apertar|pressione|pressionar)\b", n):
+    if _RE_GUI_EXPLICIT.search(n):
         return False
 
     # Pedidos explícitos de screenshot/OCR.
-    if re.search(
-        r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
-        n,
-    ):
+    if _RE_SCREEN_EXPLICIT.search(n):
         return False
 
     # Imperativo + tela/screen (apenas quando explícito).
-    has_imperative = bool(re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n))
-    has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
+    has_imperative = bool(_RE_IMPERATIVE.search(n))
+    has_screen_word = bool(_RE_SCREEN_WORD.search(n))
     if has_imperative and has_screen_word:
         return False
 
     # Pedidos explícitos de execução/terminal.
-    if re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell)\b", n):
+    if _RE_DEV_EXPLICIT.search(n):
         return False
 
     # Pedidos explícitos de programação/código (ex.: jGRASP/Java) não são chat.
-    has_programming_hint = bool(
-        re.search(r"\b(jgrasp|java|python|javascript|typescript|c\+\+|c#|csharp|html|css)\b", n)
-    )
-    has_build_verb = bool(re.search(r"\b(crie|criar|escreva|escrever|gere|gerar|fa[cç]a|faca|implemente|implementar|compile|compilar)\b", n))
+    has_programming_hint = bool(_RE_PROGRAMMING_HINT.search(n))
+    has_build_verb = bool(_RE_BUILD_VERB.search(n))
     if has_programming_hint and has_build_verb:
         return False
 
     # Pedidos explícitos de web/pesquisa/APIs.
-    if re.search(
-        r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b",
-        n,
-    ):
+    if _RE_WEB_EXPLICIT.search(n):
         return False
 
     return True
@@ -322,12 +391,7 @@ def _is_greeting(norm: str) -> bool:
 
     # Exemplos: "oi", "ola", "olá", "bom dia", "boa tarde", "boa noite",
     # "oi tudo bem", "ola!"
-    return bool(
-        re.fullmatch(
-            r"(oi|ola|opa|eai|e\s*ai|salve|bom\s+dia|boa\s+tarde|boa\s+noite)(\s+tudo\s+bem)?[!.?]*",
-            n,
-        )
-    )
+    return bool(_RE_GREETING_FULL.fullmatch(n))
 
 
 def route(settings: Settings, user_message: str) -> Plan:
@@ -350,7 +414,16 @@ def route(settings: Settings, user_message: str) -> Plan:
 
     # Prefer deterministic heuristics whenever they match.
     # This improves UX (no latency/quota) and avoids LLM hallucinations.
-    heuristic = _route_heuristic(user_message, context_messages=None)
+    cache_key = ""
+    try:
+        cache_key = "h1:" + _normalize(user_message)
+    except Exception:
+        cache_key = ""
+    heuristic = _HEURISTIC_CACHE.get(cache_key) if cache_key else None
+    if heuristic is None:
+        heuristic = _route_heuristic(user_message, context_messages=None)
+        if cache_key:
+            _HEURISTIC_CACHE.put(cache_key, heuristic)
     if heuristic.intent in _DETERMINISTIC_INTENTS:
         return heuristic
 
@@ -405,7 +478,18 @@ def route_with_registry(
             final_response="Oi! Em que posso te ajudar?",
         )
 
-    heuristic = _route_heuristic(user_message, context_messages=context_messages)
+    # Heurística pode ser cacheada apenas quando NÃO há contexto.
+    heuristic: Plan
+    if not context_messages:
+        cache_key = "h1:" + _normalize(user_message)
+        cached = _HEURISTIC_CACHE.get(cache_key)
+        if cached is not None:
+            heuristic = cached
+        else:
+            heuristic = _route_heuristic(user_message, context_messages=context_messages)
+            _HEURISTIC_CACHE.put(cache_key, heuristic)
+    else:
+        heuristic = _route_heuristic(user_message, context_messages=context_messages)
 
     # Se a heuristic escolheu tools que não existem neste runtime, devolvemos orientação.
     # (isso acontece quando dependências opcionais não foram instaladas)
@@ -476,6 +560,24 @@ def route_llm(
     - Guardrails de segurança são aplicados aqui.
     """
 
+    # Cache só quando NÃO há contexto adicional (rota inicial, mais comum).
+    cache_key = ""
+    try:
+        if not context_messages:
+            provider = str(getattr(settings, "llm_provider", "") or "").strip().lower()
+            model = str(getattr(settings, "llm_model", "") or "").strip()
+            base_url = str(getattr(settings, "llm_base_url", "") or "").strip()
+            cache_key = "l1:" + "|".join(
+                [provider, model, base_url, _registry_fingerprint(registry), _normalize(user_message)]
+            )
+    except Exception:
+        cache_key = ""
+
+    if cache_key:
+        cached = _LLM_ROUTE_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
     llm_kwargs: dict[str, Any] = {}
     if registry is not None:
         llm_kwargs["registry"] = registry
@@ -488,6 +590,9 @@ def route_llm(
     if plan is None:
         return None
 
+    if cache_key:
+        _LLM_ROUTE_CACHE.put(cache_key, plan)
+
     norm = _normalize(user_message)
 
     def _asked_for_screen_or_gui(n: str) -> bool:
@@ -496,58 +601,42 @@ def route_llm(
         # Só libera tools quando houver pedido explícito (imperativo) ou ação (clicar/digitar).
 
         # Pedidos explícitos de clique/teclado.
-        if re.search(
-            r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite|aperta|apertar|pressione|pressionar|pule|pular|jogue|jogar)\b",
-            n,
-        ):
+        if re.search(r"\b(pule|pular|jogue|jogar)\b", n) or _RE_GUI_EXPLICIT.search(n):
             return True
 
         # Pedidos explícitos de screenshot/OCR.
-        if re.search(
-            r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
-            n,
-        ):
+        if _RE_SCREEN_EXPLICIT.search(n):
             return True
 
         # Imperativo + tela/screen.
-        has_imperative = bool(
-            re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n)
-        )
-        has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
+        has_imperative = bool(_RE_IMPERATIVE.search(n))
+        has_screen_word = bool(_RE_SCREEN_WORD.search(n))
         return has_imperative and has_screen_word
 
     def _asked_for_dev_exec(n: str) -> bool:
-        return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
+        return bool(re.search(r"\bpython\b", n) or _RE_DEV_EXPLICIT.search(n))
 
     def _asked_for_os_action(n: str) -> bool:
         # Só liberamos ações no SO quando o usuário pedir explicitamente.
         # Exemplos: "abre o youtube", "abra o chrome", "feche o discord", ou uma URL explícita.
-        if re.search(r"\b(abrir|abra|abre|open|fechar|feche|fecha|close)\b", n):
+        if _RE_OS_VERBS.search(n):
             return True
-        if re.search(r"\bhttps?://\S+\b", n):
+        if _RE_URL.search(n):
             return True
-        if re.search(r"\bwww\.[^\s]+\b", n):
+        if _RE_WWW.search(n):
             return True
         return False
 
     def _asked_for_web_or_data(n: str) -> bool:
         # Só permitimos web/public APIs quando o usuário pedir explicitamente.
         # Isso evita buscas automáticas que geram captcha/blocks e melhora a UX.
-        return bool(
-            re.search(
-                r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|verifique|veja|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b",
-                n,
-            )
-        )
+        return bool(_RE_WEB_EXPLICIT.search(n) or re.search(r"\b(verifique|veja)\b", n))
 
     asked_screen_or_gui = _asked_for_screen_or_gui(norm)
     asked_dev = _asked_for_dev_exec(norm)
     asked_web = _asked_for_web_or_data(norm)
     asked_os = _asked_for_os_action(norm)
-    asked_jgrasp_task = bool(
-        re.search(r"\bjgrasp\b", norm)
-        and re.search(r"\b(crie|criar|escreva|escrever|gere|gerar|fa[cç]a|faca|implemente|implementar)\b", norm)
-    )
+    asked_jgrasp_task = bool(_RE_JGRASP_WORD.search(norm) and _RE_BUILD_VERB.search(norm))
 
     def _has_forbidden_tools(p: Plan) -> bool:
         for c in p.tool_calls:
@@ -604,7 +693,7 @@ def route_llm(
     # Safety guard: don't let the LLM trigger Discord actions unless the user asked.
     if any((c.tool_name or "").startswith("discord.") for c in plan.tool_calls):
         asked_discord = "discord" in norm
-        asked_message = bool(re.search(r"\b(mensagem|msg|chat)\b", norm))
+        asked_message = bool(_RE_DISCORD_MSG_HINT.search(norm))
         if not (asked_discord and asked_message):
             logger.warning("LLM plan attempted Discord tools without explicit user request; falling back")
             if heuristic_fallback is not None:
@@ -617,6 +706,16 @@ def route_llm(
 def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
+
+    # Chain of Responsibility (incremental): handlers pequenos e testáveis.
+    # Se nenhum handler casar, seguimos com o roteador legado (bloco monolítico).
+    try:
+        handled = run_heuristic_handlers(user_message=msg, norm=norm, context_messages=context_messages)
+        if handled is not None:
+            return handled
+    except Exception:
+        # Fallback silencioso para manter robustez (o legado cobre o resto)
+        pass
 
     # Entradas só-numéricas (usuário tentando "escolher um passo" ou responder menu).
     # O MVP não tem UX de menu por números, então damos um caminho claro.
