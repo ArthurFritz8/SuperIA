@@ -1439,7 +1439,7 @@ def _execute_plan_react(
     # Algumas tools são "single-shot" (fazem o trabalho inteiro em uma chamada).
     # Se elas forem executadas com sucesso num plano determinístico (intent == tool_name),
     # não replanejamos via LLM para evitar respostas genéricas e rate limits.
-    single_shot_tools = {"edu.pdf_word_autofill"}
+    single_shot_tools = {"edu.pdf_word_autofill", "finance.crypto_market_chart"}
 
     # Mantém um rastro curto para dar ao LLM.
     trace_messages: list[dict[str, str]] = []

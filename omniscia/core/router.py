@@ -71,6 +71,7 @@ _DETERMINISTIC_INTENTS: set[str] = {
     # Public API integrations (read-only)
     "data.weather",
     "finance.crypto_price",
+    "finance.crypto_market_chart",
     "knowledge.wikipedia_summary",
     "papers.arxiv_search",
     "web.search",
@@ -595,7 +596,7 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             )
 
     # Regra: estudar/analisar gráfico de cripto (sem navegador).
-    if re.search(r"\b(grafico|gr[aá]fico|chart)\b", norm) and re.search(r"\b(estude|estudar|analise|analisar|verifique|veja|mostre|estuda)\b", norm):
+    if re.search(r"\b(grafico|gr[aá]fico|chart)\b", norm) and re.search(r"\b(estude|estudar|analise|analisa|analisar|verifique|veja|mostre|estuda)\b", norm):
         asset: str | None = None
         if re.search(r"\bpi\s*network\b", norm):
             asset = "pi network"
@@ -3642,6 +3643,43 @@ def _route_with_llm_messages(
         if api_base:
             base_kwargs["api_base"] = api_base
 
+        def _parse_plan_json(raw_text: str) -> dict[str, Any]:
+            raw2 = (raw_text or "").strip()
+
+            # Remove fenced code blocks if the model ignored instructions.
+            raw2 = re.sub(r"^```(?:json)?\s*", "", raw2, flags=re.IGNORECASE)
+            raw2 = re.sub(r"\s*```$", "", raw2)
+            raw2 = raw2.strip()
+
+            try:
+                data0: dict[str, Any] = json.loads(raw2)
+                return data0
+            except Exception:
+                start = raw2.find("{")
+                end = raw2.rfind("}")
+                if start == -1 or end == -1 or end <= start:
+                    raise
+                data1: dict[str, Any] = json.loads(raw2[start : end + 1])
+                return data1
+
+        def _dedupe_tool_calls(p: Plan) -> Plan:
+            if not p.tool_calls:
+                return p
+            seen: set[str] = set()
+            new_calls: list[ToolCall] = []
+            for c in p.tool_calls:
+                name = (c.tool_name or "").strip()
+                try:
+                    args_sig = json.dumps(c.args or {}, ensure_ascii=False, sort_keys=True)
+                except Exception:
+                    args_sig = str(c.args)
+                sig = f"{name}|{args_sig}"
+                if sig in seen:
+                    continue
+                seen.add(sig)
+                new_calls.append(c)
+            return p.model_copy(update={"tool_calls": new_calls})
+
         resp = completion(model=str(call_settings.llm_model), messages=clean_msgs, temperature=0.0, **base_kwargs)
         maybe_warn_if_ollama_cpu(
             provider=getattr(call_settings, "llm_provider", None),
@@ -3650,18 +3688,28 @@ def _route_with_llm_messages(
         )
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
 
-        # Robustez: alguns modelos devolvem texto extra. Tentamos extrair o primeiro objeto JSON.
-        raw = content.strip()
+        raw = (content or "").strip()
         try:
-            data: dict[str, Any] = json.loads(raw)
-        except Exception:
-            start = raw.find("{")
-            end = raw.rfind("}")
-            if start == -1 or end == -1 or end <= start:
-                raise
-            data = json.loads(raw[start : end + 1])
+            data = _parse_plan_json(raw)
+        except Exception as parse_exc:  # noqa: BLE001
+            # Retry once with a stricter prompt to repair invalid JSON (common for some models).
+            repair_msg = (
+                "Seu output anterior NÃO era JSON válido e quebrou o parser. "
+                "Responda novamente APENAS com JSON VÁLIDO (sem markdown, sem comentários), "
+                "com chaves entre aspas duplas e seguindo exatamente o FORMATO especificado. "
+                f"Erro do parser: {type(parse_exc).__name__}: {str(parse_exc)[:180]}"
+            )
+            resp2 = completion(
+                model=str(call_settings.llm_model),
+                messages=clean_msgs + [{"role": "user", "content": repair_msg}],
+                temperature=0.0,
+                **base_kwargs,
+            )
+            content2: str = resp2["choices"][0]["message"]["content"]  # type: ignore[index]
+            data = _parse_plan_json((content2 or "").strip())
 
-        return Plan.model_validate(data)
+        plan = Plan.model_validate(data)
+        return _dedupe_tool_calls(plan)
 
     try:
         return _call_router_llm(settings)

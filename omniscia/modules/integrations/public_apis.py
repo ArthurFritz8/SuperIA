@@ -1750,6 +1750,96 @@ def _crypto_market_chart(args: dict[str, Any]) -> ToolResult:
     if first and first != 0.0:
         pct = (last - first) / first * 100.0
 
+    # Métricas determinísticas (sem "prever" futuro): momentum, drawdown, volatilidade e razão de retornos positivos.
+    # Observação: os pontos do CoinGecko podem ser sub-diários (ex.: horário), então tratamos como série temporal genérica.
+    def _pct_change(a: float | None, b: float | None) -> float | None:
+        try:
+            if a is None or b is None or a == 0.0:
+                return None
+            return (b - a) / a * 100.0
+        except Exception:
+            return None
+
+    def _find_value_at_or_before(target_ms: float) -> float | None:
+        # Best-effort: encontra o último valor com timestamp <= target.
+        try:
+            for ts, v in reversed(series):
+                if ts <= target_ms:
+                    return float(v)
+        except Exception:
+            pass
+        return None
+
+    last_ts = series[-1][0]
+    v_24h = _find_value_at_or_before(last_ts - 24.0 * 3600.0 * 1000.0)
+    v_7d = _find_value_at_or_before(last_ts - 7.0 * 24.0 * 3600.0 * 1000.0)
+    chg_24h = _pct_change(v_24h, last)
+    chg_7d = _pct_change(v_7d, last)
+
+    # Retornos simples e volatilidade (std dev em % por passo).
+    returns_pct: list[float] = []
+    pos_steps = 0
+    neg_steps = 0
+    for i in range(1, len(vals)):
+        a = vals[i - 1]
+        b = vals[i]
+        if a == 0.0:
+            continue
+        r = (b - a) / a * 100.0
+        returns_pct.append(r)
+        if r > 0:
+            pos_steps += 1
+        elif r < 0:
+            neg_steps += 1
+
+    vol_step_pct: float | None = None
+    if len(returns_pct) >= 2:
+        try:
+            mean = sum(returns_pct) / float(len(returns_pct))
+            var = sum((x - mean) ** 2 for x in returns_pct) / float(len(returns_pct) - 1)
+            vol_step_pct = var ** 0.5
+        except Exception:
+            vol_step_pct = None
+
+    total_steps = max(1, pos_steps + neg_steps)
+    pos_ratio = pos_steps / float(total_steps)
+
+    # Max drawdown (pico->fundo) em %.
+    max_dd: float | None = None
+    try:
+        peak = vals[0]
+        max_dd_val = 0.0
+        for v in vals:
+            if v > peak:
+                peak = v
+            if peak > 0:
+                dd = (v - peak) / peak * 100.0
+                if dd < max_dd_val:
+                    max_dd_val = dd
+        max_dd = max_dd_val
+    except Exception:
+        max_dd = None
+
+    # Tendência simples: compara média do início vs fim (últimos 20% dos pontos).
+    trend: str = "lateral"
+    try:
+        n = len(vals)
+        k = max(3, int(n * 0.2))
+        early = vals[:k]
+        late = vals[-k:]
+        m1 = sum(early) / float(len(early))
+        m2 = sum(late) / float(len(late))
+        delta = _pct_change(m1, m2)
+        if delta is not None:
+            if delta > 1.5:
+                trend = "alta"
+            elif delta < -1.5:
+                trend = "baixa"
+            else:
+                trend = "lateral"
+    except Exception:
+        trend = "lateral"
+
     # Texto enxuto (para o usuário) + payload estruturado (para automação).
     lines: list[str] = []
     lines.append(f"Asset: {asset_raw} (CoinGecko id: {coin_id})")
@@ -1757,7 +1847,19 @@ def _crypto_market_chart(args: dict[str, Any]) -> ToolResult:
     lines.append(f"Preço inicial: {first:.6g} | final: {last:.6g}")
     if pct is not None:
         lines.append(f"Variação no período: {pct:+.2f}%")
+    if chg_24h is not None:
+        lines.append(f"Mudança ~24h: {chg_24h:+.2f}%")
+    if chg_7d is not None:
+        lines.append(f"Mudança ~7d: {chg_7d:+.2f}%")
     lines.append(f"Mín: {lo:.6g} | Máx: {hi:.6g}")
+    lines.append(f"Tendência (heurística): {trend}")
+    if vol_step_pct is not None:
+        lines.append(f"Volatilidade (por passo): ~{vol_step_pct:.3g}%")
+    if max_dd is not None:
+        lines.append(f"Max drawdown: {max_dd:.2f}%")
+    lines.append(
+        f"Proporção de passos positivos (histórico): {pos_ratio*100:.1f}% (isso NÃO é previsão)"
+    )
     lines.append("Fonte: https://www.coingecko.com/")
 
     out = {
@@ -1771,6 +1873,12 @@ def _crypto_market_chart(args: dict[str, Any]) -> ToolResult:
         "low": lo,
         "high": hi,
         "pct_change": pct,
+        "change_24h_pct": chg_24h,
+        "change_7d_pct": chg_7d,
+        "trend": trend,
+        "vol_step_pct": vol_step_pct,
+        "max_drawdown_pct": max_dd,
+        "pos_step_ratio": pos_ratio,
     }
 
     text = "\n".join(lines)
@@ -2306,7 +2414,9 @@ def _crossref_search(args: dict[str, Any]) -> ToolResult:
     if err:
         return ToolResult(status="error", error=err)
 
-    items = (((data or {}).get("message") or {}) if isinstance(data, dict) else {}).get("items")
+    msg = ((data or {}).get("message") or {}) if isinstance(data, dict) else {}
+    items = msg.get("items") if isinstance(msg, dict) else None
+
     slim: list[dict[str, Any]] = []
     if isinstance(items, list):
         for it in items[:rows]:
@@ -2320,14 +2430,15 @@ def _crossref_search(args: dict[str, Any]) -> ToolResult:
             url = str(it.get("URL", "") or "")
             year = None
             try:
-                parts = (((it.get("issued") or {}).get("date-parts") or []) if isinstance(it.get("issued"), dict) else [])
+                issued = it.get("issued")
+                parts = (((issued or {}).get("date-parts") or []) if isinstance(issued, dict) else [])
                 if parts and isinstance(parts[0], list) and parts[0]:
                     year = parts[0][0]
             except Exception:
                 year = None
             slim.append({"title": title[:240], "doi": doi, "url": url, "year": year})
 
-    out = {"query": query, "results": slim}
+    out = {"query": query, "rows": rows, "results": slim}
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
