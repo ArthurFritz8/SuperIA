@@ -16,11 +16,15 @@ Nota:
 from __future__ import annotations
 
 import re
+import logging
 from datetime import datetime
 from dataclasses import dataclass
 from typing import Protocol
 
 from omniscia.core.types import Plan, RiskLevel, ToolCall
+
+
+logger = logging.getLogger(__name__)
 
 
 class HeuristicHandler(Protocol):
@@ -1268,6 +1272,152 @@ class BooksHandlers:
 
 
 @dataclass(frozen=True)
+class IbgeHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        # Estados / UFs
+        if re.search(r"\bibge\b", norm) and re.search(r"\b(estados|ufs)\b", norm):
+            return Plan(
+                intent="br.ibge_states",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="br.ibge_states", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou listar os estados (IBGE).",
+            )
+
+        # Municípios por UF
+        m = re.search(r"\bibge\b\s+(?:municipios|munic[ií]pios)\b\s*[:\-]\s*([A-Za-z]{2})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            uf = (m.group(1) or "").strip().upper()
+            return Plan(
+                intent="br.ibge_municipalities_by_uf",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="br.ibge_municipalities_by_uf", args={"uf": uf, "limit": 20})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou listar municípios por UF (IBGE).",
+            )
+
+        return None
+
+
+def _strip_quotes(s: str) -> str:
+    return str(s or "").strip().strip('"\'')
+
+
+@dataclass(frozen=True)
+class DiscordActionHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        # Abrir Discord
+        if "discord" in norm and re.search(r"\b(abrir|abra|abre|open)\b", norm):
+            return Plan(
+                intent="os.open_app",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="os.open_app", args={"app": "discord"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok, abri o Discord.",
+            )
+
+        # Fechar Discord
+        if "discord" in norm and re.search(r"\b(fechar|feche|fecha|close|encerrar)\b", norm):
+            in_background = bool(re.search(r"\b(segundo plano|background|bandeja|tray|minimizad[oa])\b", norm))
+            return Plan(
+                intent="os.close_app",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="os.close_app", args={"app": "discord", "visible_only": (not in_background)})],
+                risk=RiskLevel.HIGH,
+                final_response="Ok — vou fechar o Discord (requer aprovação).",
+            )
+
+        # Enviar mensagem no Discord (com ou sem menção explícita a Discord)
+        m = re.search(
+            r"\b(mandar|enviar)\b.*\b(mensagem|msg)\b.*\b(para|pra)\b\s*(?P<to>[^:]+?)\s*(?:\bno\b\s*discord|\bdiscord\b)?\s*[:\-]\s*(?P<text>.+)$",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            to = _strip_quotes(m.group("to") or "")
+            text = (m.group("text") or "").strip()
+            if to and text:
+                return Plan(
+                    intent="discord.send_message",
+                    user_message=msg,
+                    tool_calls=[
+                        ToolCall(tool_name="os.open_app", args={"app": "discord"}),
+                        ToolCall(tool_name="discord.send_message", args={"to": to, "message": text, "settle_ms": 900}),
+                    ],
+                    risk=RiskLevel.CRITICAL,
+                    final_response="Ok — vou enviar a mensagem no Discord (requer aprovação).",
+                )
+
+        m = re.search(
+            r"\bclique\b.*\bchat\b.*\bda\b\s*(?P<to>[^,.;:]+?)\s+e\s+\bmande\b\s+(?P<text>.+)$",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            to = _strip_quotes(m.group("to") or "")
+            text = (m.group("text") or "").strip()
+            text = re.sub(r"\b(pra|para)\s+(ela|ele|ele(a)?)\b\s*$", "", text, flags=re.IGNORECASE).strip()
+            if re.fullmatch(r"(um\s+)?oi", (norm_text := re.sub(r"\s+", " ", _strip_quotes(text).lower())).strip()):
+                text = "oi"
+            if to and text:
+                return Plan(
+                    intent="discord.send_message",
+                    user_message=msg,
+                    tool_calls=[
+                        ToolCall(tool_name="os.open_app", args={"app": "discord"}),
+                        ToolCall(tool_name="discord.send_message", args={"to": to, "message": text, "settle_ms": 900}),
+                    ],
+                    risk=RiskLevel.CRITICAL,
+                    final_response="Ok — vou abrir o chat e enviar a mensagem no Discord (requer aprovação).",
+                )
+
+        return None
+
+
+@dataclass(frozen=True)
+class JgraspHelloWorldHandler:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+        if "jgrasp" not in norm:
+            return None
+        if not re.search(r"\b(criar|crie|cria|fazer|faca|faça|gerar|gere|montar)\b", norm):
+            return None
+        if not (re.search(r"\b(programa|projeto)\b", norm) and re.search(r"\b(simples|hello\s*world|ol[aá]\s*,?\s*mundo)\b", norm)):
+            return None
+
+        wants_desktop = bool(re.search(r"\b([aá]rea de trabalho|area de trabalho|desktop)\b", norm))
+        path = "scratch/HelloWorld.java"
+        class_name = "HelloWorld"
+        if wants_desktop:
+            path = "desktop:/MeuProjeto/MeuProjeto.java"
+            class_name = "MeuProjeto"
+
+        return Plan(
+            intent="jgrasp.create_java_program",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(tool_name="os.open_app", args={"app": "jgrasp"}),
+                ToolCall(
+                    tool_name="jgrasp.create_java_program",
+                    args={
+                        "path": path,
+                        "class_name": class_name,
+                        "message": "Olá, mundo!",
+                        "open_in_jgrasp": True,
+                        "settle_ms": 900,
+                    },
+                ),
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou criar um programa Java simples no jGRASP (requer aprovação).",
+        )
+
+
+@dataclass(frozen=True)
 class HolidaysHandlers:
     def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
         msg = user_message.strip()
@@ -1330,6 +1480,9 @@ _HANDLERS: tuple[HeuristicHandler, ...] = (
     WorldTimeHandlers(),
     NewsHandlers(),
     BooksHandlers(),
+    IbgeHandlers(),
+    DiscordActionHandlers(),
+    JgraspHelloWorldHandler(),
     HolidaysHandlers(),
     CrossrefHandlers(),
 )
@@ -1344,8 +1497,11 @@ def run_heuristic_handlers(
     for h in _HANDLERS:
         try:
             plan = h.try_handle(user_message=user_message, norm=norm, context_messages=context_messages)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001
             # Heurística nunca deve derrubar o router; fallback para o legado.
+            # Mas não pode falhar silenciosamente: precisamos de visibilidade.
+            handler_name = getattr(h, "__class__", type(h)).__name__
+            logger.warning("Heuristic handler %s falhou: %s", handler_name, exc, exc_info=True)
             continue
         if plan is not None:
             return plan

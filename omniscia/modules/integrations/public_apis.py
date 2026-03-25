@@ -1510,7 +1510,7 @@ async def _web_search_async(args: dict[str, Any]) -> ToolResult:
     """Versão async de `web.search`.
 
     - Tavily: HTTP JSON (async)
-    - DuckDuckGo fallback: reusa parser sync via thread (HTML + regex)
+    - DuckDuckGo fallback: HTTP texto (async) + parser regex (sync)
     """
 
     api_key = (os.getenv("OMNI_TAVILY_API_KEY") or "").strip()
@@ -1547,7 +1547,64 @@ async def _web_search_async(args: dict[str, Any]) -> ToolResult:
             return ToolResult(status="error", error=err)
         return ToolResult(status="ok", output=json.dumps(data, ensure_ascii=False))
 
-    return await asyncio.to_thread(_duckduckgo_search, args)
+    return await _duckduckgo_search_async(args)
+
+
+async def _duckduckgo_search_async(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        max_results = int(args.get("max_results", 5) or 5)
+    except Exception:
+        max_results = 5
+    if max_results < 1:
+        max_results = 1
+    if max_results > 10:
+        max_results = 10
+
+    # Endpoint HTML simples (mais fácil de parsear e sem JS).
+    text, err = await _http_text_async(
+        url="https://html.duckduckgo.com/html/",
+        params={"q": query},
+        headers={"Accept": "text/html"},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    if not text:
+        return ToolResult(status="error", error="resposta vazia")
+
+    # Parse mínimo por regex (intencionalmente simples e best-effort).
+    titles_urls = re.findall(
+        r"<a[^>]*class=\"result__a\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    snippets = re.findall(
+        r"<a[^>]*class=\"result__snippet\"[^>]*>(.*?)</a>",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+
+    def _clean(s: str) -> str:
+        s2 = re.sub(r"<.*?>", "", s or "")
+        s2 = html.unescape(s2)
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        return s2
+
+    slim: list[dict[str, Any]] = []
+    for i, (url, title) in enumerate(titles_urls[:max_results]):
+        t = _clean(title)[:160]
+        u = html.unescape(url).strip()
+        sn = _clean(snippets[i] if i < len(snippets) else "")[:600]
+        if not u:
+            continue
+        slim.append({"title": t, "url": u, "content": sn, "source": "duckduckgo"})
+
+    out = {"query": query, "results": slim}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
 def _duckduckgo_search(args: dict[str, Any]) -> ToolResult:
