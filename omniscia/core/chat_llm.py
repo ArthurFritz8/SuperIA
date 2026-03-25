@@ -13,6 +13,9 @@ Política:
 from __future__ import annotations
 
 import logging
+import os
+import re
+import threading
 from typing import Any
 
 from omniscia.core.config import Settings
@@ -21,6 +24,98 @@ from omniscia.core.ollama_health import maybe_warn_if_ollama_cpu
 from omniscia.core.redact import redact_secrets
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(str(os.getenv(name, str(default))).strip())
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
+def _should_use_smart_model(text: str) -> bool:
+    """Heurística conservadora: usa modelo 'smart' só quando parece tarefa de código/debug.
+
+    Motivo: modelos maiores (ex.: 8B) podem aumentar muito a latência.
+    """
+
+    t = (text or "").strip().lower()
+    if "```" in t:
+        return True
+    if "traceback" in t or "stack trace" in t:
+        return True
+    if re.search(r"\b(keyerror|typeerror|valueerror|attributeerror|exception|segmentation fault)\b", t):
+        return True
+    if re.search(r"\b(debug|bug|erro|falha|crash|refator|otimiz|arquitet|projeto|c[oó]digo|algoritm)\b", t):
+        return True
+    return False
+
+
+def _pick_chat_model(settings: Settings, user_text: str) -> str:
+    """Seleciona o modelo para o chat.
+
+    Defaults:
+    - Usa `settings.llm_model`.
+    - Se `OMNI_LLM_SMART_MODEL` estiver definido e o pedido parecer complexo, usa ele.
+    """
+
+    model = str(settings.llm_model or "").strip()
+    smart = str(os.getenv("OMNI_LLM_SMART_MODEL", "") or "").strip()
+    if smart and _should_use_smart_model(user_text):
+        return smart
+    return model
+
+
+def warmup_llm_best_effort(settings: Settings, *, blocking: bool = False) -> None:
+    """Faz warmup do modelo local para reduzir o cold-start (best-effort).
+
+    Estratégia:
+    - Dispara uma completion mínima com `max_tokens=1`.
+    - Rodar em background para não travar o REPL.
+    """
+
+    try:
+        provider = (getattr(settings, "llm_provider", None) or "").strip().lower()
+        if provider != "ollama":
+            return
+
+        base_url = (getattr(settings, "llm_base_url", None) or "").strip() or None
+        if not base_url:
+            return
+
+        model_main = str(getattr(settings, "llm_model", None) or "").strip()
+        model_smart = str(os.getenv("OMNI_LLM_SMART_MODEL", "") or "").strip()
+        model_router = str(os.getenv("OMNI_ROUTER_LLM_MODEL", "") or "").strip()
+
+        warm_smart = (os.getenv("OMNI_LLM_WARMUP_SMART", "false").strip().lower() == "true")
+        models = [m for m in [model_router, model_main] if m]
+        if warm_smart and model_smart:
+            models.append(model_smart)
+        if not models:
+            return
+
+        apply_litellm_env(settings)
+        from litellm import completion  # type: ignore
+
+        max_tokens = 1
+        base_kwargs: dict[str, Any] = {"api_base": base_url, "timeout": 12}
+        msgs = [{"role": "user", "content": "warmup"}]
+
+        def _run() -> None:
+            for m in models:
+                try:
+                    completion(model=str(m), messages=msgs, temperature=0.0, max_tokens=max_tokens, **base_kwargs)
+                except Exception:
+                    # warmup é best-effort
+                    pass
+
+        if blocking:
+            _run()
+        else:
+            threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        return
 
 
 def _has_llm_config(settings: Settings) -> bool:
@@ -55,8 +150,9 @@ def chat_reply(
     if not _has_llm_config(settings):
         raise RuntimeError("LLM não configurado (OMNI_LLM_PROVIDER/OMNI_LLM_MODEL/OMNI_LLM_API_KEY)")
 
-    model = settings.llm_model
-    assert model is not None
+    model = _pick_chat_model(settings, str(user_message or ""))
+    if not model:
+        raise RuntimeError("LLM model não definido")
 
     apply_litellm_env(settings)
 
@@ -118,18 +214,23 @@ def chat_reply(
     else:
         msgs.append({"role": "user", "content": user_text})
 
+    max_tokens = _env_int("OMNI_CHAT_MAX_TOKENS", 256)
+    timeout_s = float(os.getenv("OMNI_CHAT_TIMEOUT_S", "45").strip() or "45")
+
     def _call_llm(*, provider_settings: Settings, llm_model: str, llm_api_base: str | None) -> str:
         apply_litellm_env(provider_settings)
         # api_base é aceito pelo LiteLLM para vários providers (OpenAI-compat e Ollama).
         base_kwargs: dict[str, Any] = {}
         if llm_api_base:
             base_kwargs["api_base"] = llm_api_base
+        base_kwargs["timeout"] = timeout_s
 
         try:
             resp: Any = completion(
                 model=llm_model,
                 messages=msgs,
                 temperature=float(temperature),
+                max_tokens=int(max_tokens),
                 **base_kwargs,
             )
             maybe_warn_if_ollama_cpu(
@@ -157,6 +258,7 @@ def chat_reply(
                     model=llm_model,
                     messages=msgs2,
                     temperature=float(temperature),
+                    max_tokens=int(max_tokens),
                     **base_kwargs,
                 )
                 maybe_warn_if_ollama_cpu(

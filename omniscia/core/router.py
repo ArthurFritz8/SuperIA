@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import unicodedata
 from datetime import datetime
@@ -24,6 +25,14 @@ from omniscia.core.tools import ToolRegistry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        v = int(str(os.getenv(name, str(default))).strip())
+        return v if v > 0 else default
+    except Exception:
+        return default
 
 
 _DETERMINISTIC_INTENTS: set[str] = {
@@ -3704,6 +3713,12 @@ def _route_with_llm_messages(
         if api_base:
             base_kwargs["api_base"] = api_base
 
+        # Router deve ser rápido e determinístico.
+        base_kwargs["timeout"] = float(os.getenv("OMNI_ROUTER_TIMEOUT_S", "25").strip() or "25")
+        router_max_tokens = _env_int("OMNI_ROUTER_MAX_TOKENS", 256)
+
+        router_model = (os.getenv("OMNI_ROUTER_LLM_MODEL", "") or "").strip() or str(call_settings.llm_model)
+
         def _parse_plan_json(raw_text: str) -> dict[str, Any]:
             raw2 = (raw_text or "").strip()
 
@@ -3741,11 +3756,17 @@ def _route_with_llm_messages(
                 new_calls.append(c)
             return p.model_copy(update={"tool_calls": new_calls})
 
-        resp = completion(model=str(call_settings.llm_model), messages=clean_msgs, temperature=0.0, **base_kwargs)
+        resp = completion(
+            model=str(router_model),
+            messages=clean_msgs,
+            temperature=0.0,
+            max_tokens=int(router_max_tokens),
+            **base_kwargs,
+        )
         maybe_warn_if_ollama_cpu(
             provider=getattr(call_settings, "llm_provider", None),
             base_url=(getattr(call_settings, "llm_base_url", None) or None),
-            model=str(call_settings.llm_model),
+            model=str(router_model),
         )
         content: str = resp["choices"][0]["message"]["content"]  # type: ignore[index]
 
@@ -3761,9 +3782,10 @@ def _route_with_llm_messages(
                 f"Erro do parser: {type(parse_exc).__name__}: {str(parse_exc)[:180]}"
             )
             resp2 = completion(
-                model=str(call_settings.llm_model),
+                model=str(router_model),
                 messages=clean_msgs + [{"role": "user", "content": repair_msg}],
                 temperature=0.0,
+                max_tokens=int(router_max_tokens),
                 **base_kwargs,
             )
             content2: str = resp2["choices"][0]["message"]["content"]  # type: ignore[index]

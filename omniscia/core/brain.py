@@ -35,6 +35,7 @@ from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
 from omniscia.core.chat_llm import chat_reply
+from omniscia.core.chat_llm import warmup_llm_best_effort
 from omniscia.core.workers import WorkerManager
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.tts.factory import build_tts
@@ -183,6 +184,18 @@ def run_brain_loop(settings: Settings) -> None:
             console.print("[dim]Proatividade habilitada (scheduler em background).[/dim]")
         except Exception as exc:  # noqa: BLE001
             console.print(f"[yellow]Proatividade indisponível:[/yellow] {exc}")
+
+    # Warmup do LLM local (reduz cold-start / primeira resposta lenta). Best-effort.
+    # Pode ser desligado via OMNI_LLM_WARMUP=false.
+    # Por padrão, fazemos bloqueante para o 1º turno já vir rápido.
+    try:
+        import os
+
+        if (os.getenv("OMNI_LLM_WARMUP", "true").strip().lower() != "false"):
+            blocking = (os.getenv("OMNI_LLM_WARMUP_BLOCKING", "true").strip().lower() != "false")
+            warmup_llm_best_effort(settings, blocking=blocking)
+    except Exception:
+        pass
 
     console.print(Panel.fit("Omnisciência (MVP) — digite seu comando (ou 'sair')", title="OK"))
 
