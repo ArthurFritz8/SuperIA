@@ -8,6 +8,18 @@ $ErrorActionPreference = "Stop"
 $env:OLLAMA_VULKAN = "1"
 $env:OLLAMA_HOST = "$HostAddr`:$Port"
 
+if (-not $env:OLLAMA_KEEP_ALIVE) {
+  $env:OLLAMA_KEEP_ALIVE = "30m"
+}
+
+if (-not $env:OLLAMA_NUM_PARALLEL) {
+  $env:OLLAMA_NUM_PARALLEL = "1"
+}
+
+if (-not $env:OLLAMA_MAX_LOADED_MODELS) {
+  $env:OLLAMA_MAX_LOADED_MODELS = "1"
+}
+
 Write-Host "Starting Ollama with Vulkan (GPU) on $($env:OLLAMA_HOST)" -ForegroundColor Cyan
 Write-Host "Tip: set OMNI_LLM_BASE_URL=http://$HostAddr`:$Port in your .env" -ForegroundColor DarkGray
 

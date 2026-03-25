@@ -244,6 +244,52 @@ def _normalize(text: str) -> str:
     return t
 
 
+def _looks_like_chat_message(norm: str) -> bool:
+    """Retorna True quando a mensagem parece conversa (sem pedido explícito de tools).
+
+    Objetivo: reduzir latência e uso de recursos evitando uma chamada extra ao LLM
+    só para roteamento em mensagens claramente conversacionais.
+
+    Regras:
+    - Se houver pedido explícito de web/GUI/dev, NÃO é chat.
+    - Caso contrário, trata como chat (conservador para evitar tool acidental).
+    """
+
+    n = (norm or "").strip()
+    if not n:
+        return True
+
+    # Pedidos explícitos de GUI (cliques/teclado).
+    if re.search(r"\b(clica|clicar|clique|mouse|teclado|digita|digitar|digite|aperta|apertar|pressione|pressionar)\b", n):
+        return False
+
+    # Pedidos explícitos de screenshot/OCR.
+    if re.search(
+        r"\b(screenshot|print\s*screen|printscreen|captura\s+de\s+tela|ocr|ler\s+texto|leia\s+o\s+texto)\b",
+        n,
+    ):
+        return False
+
+    # Imperativo + tela/screen (apenas quando explícito).
+    has_imperative = bool(re.search(r"\b(olha|olhe|veja|ver|verifique|analise|analisa|mostra|mostre|leia)\b", n))
+    has_screen_word = bool(re.search(r"\b(tela|screen)\b", n))
+    if has_imperative and has_screen_word:
+        return False
+
+    # Pedidos explícitos de execução/terminal.
+    if re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell)\b", n):
+        return False
+
+    # Pedidos explícitos de web/pesquisa/APIs.
+    if re.search(
+        r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b",
+        n,
+    ):
+        return False
+
+    return True
+
+
 def route(settings: Settings, user_message: str) -> Plan:
     # Exit must be handled deterministically before any LLM routing.
     # Otherwise the LLM may hallucinate a destructive action (e.g., shutdown).
@@ -256,6 +302,16 @@ def route(settings: Settings, user_message: str) -> Plan:
     heuristic = _route_heuristic(user_message, context_messages=None)
     if heuristic.intent in _DETERMINISTIC_INTENTS:
         return heuristic
+
+    # Fast-path: em mensagens claramente conversacionais, não chama o router LLM.
+    # Isso evita 2 chamadas por turno (route_llm + chat_reply) e melhora performance.
+    if (
+        heuristic.intent == "chat"
+        and not heuristic.tool_calls
+        and not (heuristic.final_response or "").strip()
+        and _looks_like_chat_message(_normalize(user_message))
+    ):
+        return Plan(intent="chat", user_message=user_message.strip(), tool_calls=[], risk=RiskLevel.LOW)
 
     if settings.router_mode == "llm":
         plan = route_llm(settings, user_message, heuristic_fallback=heuristic)
@@ -315,6 +371,15 @@ def route_with_registry(
 
     if heuristic.intent in _DETERMINISTIC_INTENTS:
         return heuristic
+
+    # Mesmo fast-path da versão sem registry.
+    if (
+        heuristic.intent == "chat"
+        and not heuristic.tool_calls
+        and not (heuristic.final_response or "").strip()
+        and _looks_like_chat_message(_normalize(user_message))
+    ):
+        return Plan(intent="chat", user_message=user_message.strip(), tool_calls=[], risk=RiskLevel.LOW)
 
     if settings.router_mode == "llm":
         plan = route_llm(

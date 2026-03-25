@@ -1493,6 +1493,14 @@ def _wikipedia_summary(args: dict[str, Any]) -> ToolResult:
 
     data, err = _http_json(method="GET", url=url)
     if err:
+        if str(err).startswith("HTTP 404"):
+            out = {
+                "title": title,
+                "lang": lang,
+                "url": "",
+                "summary": "Página não encontrada na Wikipedia.",
+            }
+            return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
         return ToolResult(status="error", error=err)
 
     assert data is not None
@@ -1504,7 +1512,13 @@ def _wikipedia_summary(args: dict[str, Any]) -> ToolResult:
         page_url = ""
 
     if not extract:
-        return ToolResult(status="error", error="sem resumo (página não encontrada ou vazia)")
+        out = {
+            "title": str(data.get("title", "") or title),
+            "lang": lang,
+            "url": page_url,
+            "summary": "Sem resumo disponível (página não encontrada ou vazia).",
+        }
+        return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
     out = {
         "title": str(data.get("title", "") or title),

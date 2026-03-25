@@ -44,6 +44,42 @@ from omniscia.modules.memory.profile_store import UserProfileStore
 logger = logging.getLogger(__name__)
 
 
+def _is_connection_refused_error(exc: Exception) -> bool:
+    s = str(exc or "")
+    return (
+        "WinError 10061" in s
+        or "connection refused" in s.lower()
+        or "nenhuma conexão" in s.lower()
+        or "api connection" in s.lower()
+    )
+
+
+def _chat_llm_unavailable_message(settings: Settings, exc: Exception) -> str:
+    provider = (getattr(settings, "llm_provider", None) or "").strip().lower()
+    base_url = (getattr(settings, "llm_base_url", None) or "").strip() or "http://127.0.0.1:11434"
+    model = (getattr(settings, "llm_model", None) or "").strip() or "(não definido)"
+
+    if provider == "ollama" and _is_connection_refused_error(exc):
+        return (
+            "Chat LLM indisponível: não consegui conectar ao Ollama.\n"
+            f"- base_url: {base_url}\n"
+            f"- model: {model}\n\n"
+            "Como corrigir (Windows/AMD Vulkan):\n"
+            "1) Feche o Ollama Desktop (ícone na bandeja) se estiver aberto\n"
+            "2) Rode: powershell -ExecutionPolicy Bypass -File scripts/windows/ollama_vulkan_serve.ps1\n"
+            "3) Valide: ollama ps  (PROCESSOR deve mostrar GPU)\n"
+            "   ou abra no navegador: http://127.0.0.1:11434/api/ps\n"
+        )
+
+    # Fallback genérico (rede/config)
+    return (
+        "Chat LLM indisponível agora (rede/config).\n"
+        f"- provider: {provider or '(vazio)'}\n"
+        f"- base_url: {base_url}\n"
+        f"- erro: {exc}"
+    )
+
+
 def run_brain_loop(settings: Settings) -> None:
     """Loop REPL do agente."""
 
@@ -488,9 +524,16 @@ def run_brain_loop(settings: Settings) -> None:
                         logger.exception("Falha ao falar resposta (TTS)")
                 continue
             except Exception as exc:  # noqa: BLE001
-                # Se o chat LLM falhar (config/deps/rede), cai no caminho antigo.
-                logger.exception("Falha no chat LLM")
-                console.print(f"[yellow]Chat LLM indisponível:[/yellow] {exc}")
+                # Se o chat LLM falhar (config/deps/rede), mostre orientação clara.
+                # Evita poluir o terminal com traceback gigante em casos comuns (Ollama offline/porta fechada).
+                msg = _chat_llm_unavailable_message(settings, exc)
+                if _is_connection_refused_error(exc):
+                    logger.warning("Chat LLM indisponível (conexão recusada): %s", exc)
+                else:
+                    logger.warning("Chat LLM indisponível: %s", exc)
+                console.print(f"[yellow]{msg}[/yellow]")
+                memory.append("agent_response", {"text": msg})
+                continue
 
         memory.append(
             "plan",

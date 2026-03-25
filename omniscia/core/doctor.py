@@ -14,6 +14,8 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 
 from omniscia.core.config import Settings
@@ -56,6 +58,25 @@ def _run_version(cmd: list[str], *, timeout_s: float = 2.0) -> tuple[bool, str]:
         err = (p.stderr or "").strip()
         txt = out or err or f"exit={p.returncode}"
         return p.returncode == 0, txt.splitlines()[0][:240]
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _ping_ollama(base_url: str, *, timeout_s: float = 1.6) -> tuple[bool, str]:
+    b = (base_url or "").strip()
+    if not b:
+        return False, "base_url vazio"
+    while b.endswith("/"):
+        b = b[:-1]
+    url = f"{b}/api/ps"
+    try:
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout_s) as r:  # noqa: S310
+            code = getattr(r, "status", 200)
+        return True, f"ok ({url})"
+    except urllib.error.HTTPError as exc:
+        # Se respondeu HTTP, o server está de pé (mesmo que algo esteja diferente).
+        return True, f"http {exc.code} ({url})"
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
 
@@ -270,6 +291,23 @@ def run_doctor(*, settings: Settings | None = None) -> tuple[bool, str]:
                 fix="Configure OMNI_LLM_MODEL no .env (ou use o padrao do provider)",
             )
         )
+
+        # Ollama reachability (common failure: port not listening / desktop stole port / server not started).
+        if provider.strip().lower() == "ollama":
+            base = str(getattr(settings, "llm_base_url", "") or "").strip() or "http://127.0.0.1:11434"
+            ok, detail = _ping_ollama(base, timeout_s=1.6)
+            checks.append(
+                Check(
+                    name="Ollama HTTP",
+                    ok=ok,
+                    detail=detail,
+                    fix=(
+                        "Inicie o Ollama (Vulkan/GPU): powershell -ExecutionPolicy Bypass -File scripts\\windows\\ollama_vulkan_serve.ps1"
+                        if not ok
+                        else None
+                    ),
+                )
+            )
 
     # Tesseract CLI (used by OCR)
     if settings.tesseract_cmd:
