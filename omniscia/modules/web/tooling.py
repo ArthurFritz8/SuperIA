@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import asyncio
 from pathlib import Path
 from typing import Any
 import json
@@ -29,6 +30,7 @@ def register_web_tools(registry: ToolRegistry, settings: Settings) -> None:
             description="Abre uma URL e retorna texto do body (read-only)",
             risk="MEDIUM",
             fn=lambda args: _web_get_page_text(args, settings=settings),
+            async_fn=lambda args: _web_get_page_text_async(args, settings=settings),
         )
     )
 
@@ -38,6 +40,7 @@ def register_web_tools(registry: ToolRegistry, settings: Settings) -> None:
             description="Tira screenshot de uma URL e salva como PNG (path relativo)",
             risk="MEDIUM",
             fn=lambda args: _web_screenshot(args, settings=settings),
+            async_fn=lambda args: _web_screenshot_async(args, settings=settings),
         )
     )
 
@@ -47,6 +50,7 @@ def register_web_tools(registry: ToolRegistry, settings: Settings) -> None:
             description="Extrai links (href + texto) de uma URL (read-only)",
             risk="MEDIUM",
             fn=lambda args: _web_get_links(args, settings=settings),
+            async_fn=lambda args: _web_get_links_async(args, settings=settings),
         )
     )
 
@@ -59,8 +63,126 @@ def register_web_tools(registry: ToolRegistry, settings: Settings) -> None:
             ),
             risk="MEDIUM",
             fn=lambda args: _web_research(args, settings=settings),
+            async_fn=lambda args: _web_research_async(args, settings=settings),
         )
     )
+
+
+async def _web_get_page_text_async(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    # Mantém comportamento: se Playwright não existir, retorna erro igual.
+    ok, err = _require_playwright()
+    if not ok:
+        return ToolResult(status="error", error=err)
+
+    url = str(args.get("url", "")).strip()
+    max_chars = int(args.get("max_chars", 6000) or 6000)
+
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ToolResult(status="error", error="url inválida (use http/https)")
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=settings.web_headless)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            text = await page.inner_text("body")
+            await browser.close()
+
+        text = (text or "").strip()
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n... [truncado]"
+        return ToolResult(status="ok", output=text)
+    except Exception:
+        # Fallback robusto: usa versão sync em thread.
+        return await asyncio.to_thread(_web_get_page_text, args, settings=settings)
+
+
+async def _web_screenshot_async(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    ok, err = _require_playwright()
+    if not ok:
+        return ToolResult(status="error", error=err)
+
+    url = str(args.get("url", "")).strip()
+    path = str(args.get("path", "data/screenshots/page.png")).strip().replace("\\", "/")
+    full_page = bool(args.get("full_page", True))
+
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ToolResult(status="error", error="url inválida (use http/https)")
+
+    if not path or path.startswith("/") or ":" in path:
+        return ToolResult(status="error", error="path inválido (use path relativo)")
+    if not path.lower().endswith(".png"):
+        return ToolResult(status="error", error="path deve terminar com .png")
+
+    try:
+        from playwright.async_api import async_playwright
+
+        out = Path(path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=settings.web_headless)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+            await page.screenshot(path=str(out), full_page=full_page)
+            await browser.close()
+
+        return ToolResult(status="ok", output=f"saved screenshot: {path}")
+    except Exception:
+        return await asyncio.to_thread(_web_screenshot, args, settings=settings)
+
+
+async def _web_get_links_async(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    ok, err = _require_playwright()
+    if not ok:
+        return ToolResult(status="error", error=err)
+
+    url = str(args.get("url", "")).strip()
+    max_links = int(args.get("max_links", 50) or 50)
+
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return ToolResult(status="error", error="url inválida (use http/https)")
+
+    try:
+        from playwright.async_api import async_playwright
+
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=settings.web_headless)
+            page = await browser.new_page()
+            await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+
+            anchors = await page.query_selector_all("a[href]")
+            links: list[dict[str, str]] = []
+            seen: set[str] = set()
+            for a in anchors:
+                href = (await a.get_attribute("href") or "").strip()
+                text = (await a.inner_text() or "").strip()
+                if not href:
+                    continue
+
+                abs_href = await page.evaluate("(a) => a.href", a)
+                abs_href = (abs_href or href or "").strip()
+                if abs_href in seen:
+                    continue
+                seen.add(abs_href)
+                links.append({"href": abs_href, "text": text})
+                if len(links) >= max_links:
+                    break
+
+            await browser.close()
+
+        return ToolResult(status="ok", output=json.dumps({"url": url, "links": links}, ensure_ascii=False))
+    except Exception:
+        return await asyncio.to_thread(_web_get_links, args, settings=settings)
+
+
+async def _web_research_async(args: dict[str, Any], *, settings: Settings) -> ToolResult:
+    ok, err = _require_playwright()
+    if not ok:
+        return ToolResult(status="error", error=err)
+    return await asyncio.to_thread(_web_research, args, settings=settings)
 
 
 def _require_playwright() -> tuple[bool, str | None]:

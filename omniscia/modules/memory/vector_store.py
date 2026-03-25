@@ -110,3 +110,29 @@ class ChromaVectorMemory:
                 )
             )
         return hits
+
+    def list_ids(self, *, limit: int = 10000) -> list[str]:
+        """Lista ids existentes (best-effort).
+
+        Usado para manutenção (ex.: pruning). Em coleções grandes, `limit` evita
+        puxar tudo de uma vez.
+        """
+
+        if limit < 1:
+            limit = 1
+        try:
+            res = self._col.get(include=[], limit=int(limit))
+            ids = res.get("ids") or []
+            return [str(i) for i in ids]
+        except Exception:
+            return []
+
+    def delete(self, *, item_id: str) -> None:
+        """Remove um item por id (best-effort)."""
+
+        if not item_id or not str(item_id).strip():
+            return
+        try:
+            self._col.delete(ids=[str(item_id)])
+        except Exception:
+            return

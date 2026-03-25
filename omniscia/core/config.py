@@ -193,6 +193,10 @@ class Settings:
     workers_enabled: bool = False
     workers_max: int = 2
 
+    # Async (opt-in)
+    # Caminho incremental para habilitar execução async (tools/LLM) sem big-bang rewrite.
+    async_enabled: bool = False
+
     @staticmethod
     def load() -> "Settings":
         """Carrega settings do ambiente.
@@ -208,6 +212,7 @@ class Settings:
         router_mode = os.getenv("OMNI_ROUTER_MODE", "heuristic").strip() or "heuristic"
         stt_mode = os.getenv("OMNI_STT_MODE", "text").strip() or "text"
         tts_mode = os.getenv("OMNI_TTS_MODE", "none").strip() or "none"
+        async_enabled = (os.getenv("OMNI_ASYNC", "false").strip().lower() == "true")
         hitl_enabled = (os.getenv("OMNI_HITL_ENABLED", "true").strip().lower() != "false")
         hitl_require_token = (
             os.getenv("OMNI_HITL_REQUIRE_TOKEN", "false").strip().lower() == "true"
@@ -523,4 +528,6 @@ class Settings:
 
             workers_enabled=workers_enabled,
             workers_max=workers_max,
+
+            async_enabled=async_enabled,
         )

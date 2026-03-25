@@ -19,8 +19,11 @@ import os
 import re
 import threading
 import time
+import asyncio
+from enum import Enum, auto
 from pathlib import Path
 from dataclasses import replace
+from dataclasses import dataclass
 from rich.console import Console
 from rich.panel import Panel
 
@@ -31,18 +34,123 @@ from omniscia.core.policy import PolicyEngine
 from omniscia.core.runlog import RunLogger
 from omniscia.core.snapshots import SnapshotManager
 from omniscia.core.router import route_llm, route_with_registry
+from omniscia.core.router import route_llm_async, route_with_registry_async
 from omniscia.core.tools import build_default_registry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
 from omniscia.core.chat_llm import chat_reply
 from omniscia.core.chat_llm import warmup_llm_best_effort
 from omniscia.core.workers import WorkerManager
+from omniscia.core.react_fsm import execute_plan_react as _react_execute_plan_react
+from omniscia.core.react_fsm import execute_plan_react_async as _react_execute_plan_react_async
+from omniscia.core.metrics import Metrics
+from omniscia.core.repl_helpers import capture_hotkey_screen_context
+from omniscia.core.repl_helpers import handle_worker_commands
+from omniscia.core.repl_helpers import recover_from_stt_error
 from omniscia.modules.stt.factory import build_stt
 from omniscia.modules.tts.factory import build_tts
 from omniscia.modules.memory.store import JsonlMemoryStore
 from omniscia.modules.memory.profile_store import UserProfileStore
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BrainContext:
+    console: Console
+    memory: JsonlMemoryStore
+    registry: object
+    profile_store: UserProfileStore
+    approvals: ApprovalStore
+    policy: PolicyEngine
+    snapshot_mgr: SnapshotManager
+    runlog: RunLogger
+    worker_mgr: WorkerManager | None
+    tts_lock: threading.Lock
+    stt: object
+    tts: object
+    vector_memory: object | None
+    screen_hotkey_flag: threading.Event
+
+
+def build_brain_context(settings: Settings, *, console: Console) -> BrainContext:
+    memory = JsonlMemoryStore()
+    registry = build_default_registry(settings=settings, memory_store=memory)
+    profile_store = UserProfileStore()
+
+    approvals = ApprovalStore(getattr(settings, "hitl_approvals_path", "data/hitl_approvals.json"))
+    try:
+        approvals.load()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Falha ao carregar approvals (seguindo sem persistência): %s", exc)
+
+    stt = build_stt(settings, console=console)
+    tts = build_tts(settings, console=console)
+
+    policy = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
+    try:
+        policy.load()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Falha ao carregar policy (seguindo com defaults): %s", exc)
+
+    snapshot_mgr = SnapshotManager(
+        snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots")
+    )
+    runlog = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+
+    worker_mgr: WorkerManager | None = None
+    if getattr(settings, "workers_enabled", False):
+        try:
+            worker_mgr = WorkerManager(max_workers=int(getattr(settings, "workers_max", 2) or 2))
+            console.print("[dim]Workers habilitados (background jobs). Use: jobs | job <id> | cancel <id>[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Workers indisponíveis:[/yellow] {exc}")
+            worker_mgr = None
+
+    tts_lock = threading.Lock()
+
+    vector_memory = None
+    if getattr(settings, "vector_memory_enabled", False):
+        try:
+            from omniscia.modules.memory.vector_store import ChromaVectorMemory
+
+            vector_memory = ChromaVectorMemory(
+                persist_dir=str(getattr(settings, "vector_memory_persist_dir", "data/chroma") or "data/chroma"),
+                collection=str(getattr(settings, "vector_memory_collection", "omniscia_memory") or "omniscia_memory"),
+                embed_model=str(
+                    getattr(settings, "vector_memory_embed_model", "all-MiniLM-L6-v2") or "all-MiniLM-L6-v2"
+                ),
+            )
+            console.print("[dim]Memória vetorial habilitada (RAG).[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Memória vetorial indisponível:[/yellow] {exc}")
+
+    screen_hotkey_flag = threading.Event()
+    if getattr(settings, "hotkey_screen_enabled", False):
+        try:
+            from omniscia.core.hotkeys import start_screen_hotkey_listener
+
+            start_screen_hotkey_listener(screen_hotkey_flag)
+            console.print("[dim]Hotkey habilitada: Ctrl+Space (capturar contexto de tela).[/dim]")
+        except Exception as exc:  # noqa: BLE001
+            console.print(f"[yellow]Hotkey indisponível:[/yellow] {exc}")
+
+    return BrainContext(
+        console=console,
+        memory=memory,
+        registry=registry,
+        profile_store=profile_store,
+        approvals=approvals,
+        policy=policy,
+        snapshot_mgr=snapshot_mgr,
+        runlog=runlog,
+        worker_mgr=worker_mgr,
+        tts_lock=tts_lock,
+        stt=stt,
+        tts=tts,
+        vector_memory=vector_memory,
+        screen_hotkey_flag=screen_hotkey_flag,
+    )
 
 
 def _is_connection_refused_error(exc: Exception) -> bool:
@@ -85,73 +193,28 @@ def run_brain_loop(settings: Settings) -> None:
     """Loop REPL do agente."""
 
     console = Console()
-    memory = JsonlMemoryStore()
-    registry = build_default_registry(settings=settings, memory_store=memory)
-    profile_store = UserProfileStore()
+    ctx = build_brain_context(settings, console=console)
 
-    # HITL approvals persistentes (opt-in via settings). Carrega uma vez por sessão.
-    approvals = ApprovalStore(getattr(settings, "hitl_approvals_path", "data/hitl_approvals.json"))
-    try:
-        approvals.load()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Falha ao carregar approvals (seguindo sem persistência): %s", exc)
-    stt = build_stt(settings, console=console)
-    tts = build_tts(settings, console=console)
-
-    # Policy engine (offline guardrails)
-    policy = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
-    try:
-        policy.load()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Falha ao carregar policy (seguindo com defaults): %s", exc)
-
-    # Snapshots + runlog (observabilidade)
-    snapshot_mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
-    runlog = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+    memory = ctx.memory
+    registry = ctx.registry
+    profile_store = ctx.profile_store
+    approvals = ctx.approvals
+    policy = ctx.policy
+    snapshot_mgr = ctx.snapshot_mgr
+    runlog = ctx.runlog
+    worker_mgr = ctx.worker_mgr
+    tts_lock = ctx.tts_lock
+    stt = ctx.stt
+    tts = ctx.tts
+    vector_memory = ctx.vector_memory
+    screen_hotkey_flag = ctx.screen_hotkey_flag
 
     last_plan: Plan | None = None
 
     # Permissões por sessão (não persistem no .env): auto-programação / tools custom.
     session_self_coding_granted = False
 
-    # Workers (background) — permite continuar conversando durante automações longas.
-    worker_mgr: WorkerManager | None = None
-    if getattr(settings, "workers_enabled", False):
-        try:
-            worker_mgr = WorkerManager(max_workers=int(getattr(settings, "workers_max", 2) or 2))
-            console.print("[dim]Workers habilitados (background jobs). Use: jobs | job <id> | cancel <id>[/dim]")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Workers indisponíveis:[/yellow] {exc}")
-            worker_mgr = None
-
-    # Lock para evitar concorrência no TTS (alguns engines não são thread-safe).
-    tts_lock = threading.Lock()
-
-    # Memória vetorial (opt-in) para RAG. Best-effort: se deps faltarem, seguimos sem.
-    vector_memory = None
-    if getattr(settings, "vector_memory_enabled", False):
-        try:
-            from omniscia.modules.memory.vector_store import ChromaVectorMemory
-
-            vector_memory = ChromaVectorMemory(
-                persist_dir=str(getattr(settings, "vector_memory_persist_dir", "data/chroma") or "data/chroma"),
-                collection=str(getattr(settings, "vector_memory_collection", "omniscia_memory") or "omniscia_memory"),
-                embed_model=str(getattr(settings, "vector_memory_embed_model", "all-MiniLM-L6-v2") or "all-MiniLM-L6-v2"),
-            )
-            console.print("[dim]Memória vetorial habilitada (RAG).[/dim]")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Memória vetorial indisponível:[/yellow] {exc}")
-
-    # Hotkey (opt-in): Ctrl+Space arma captura de tela (screenshot + OCR) para a próxima mensagem.
-    screen_hotkey_flag = threading.Event()
-    if getattr(settings, "hotkey_screen_enabled", False):
-        try:
-            from omniscia.core.hotkeys import start_screen_hotkey_listener
-
-            start_screen_hotkey_listener(screen_hotkey_flag)
-            console.print("[dim]Hotkey habilitada: Ctrl+Space (capturar contexto de tela).[/dim]")
-        except Exception as exc:  # noqa: BLE001
-            console.print(f"[yellow]Hotkey indisponível:[/yellow] {exc}")
+    # (Workers/locks/vector/hotkey já vêm do contexto.)
 
     # Rewind multimodal (opt-in): sob demanda (não inicia sozinho).
     if getattr(settings, "rewind_enabled", False):
@@ -237,105 +300,24 @@ def run_brain_loop(settings: Settings) -> None:
             return
         except Exception as exc:  # noqa: BLE001
             # Se o STT falhar (microfone, deps), caímos para texto no próximo loop.
-            logger.exception("Falha no STT")
-            console.print(f"[red]Erro no STT:[/red] {exc}")
-            console.print("[yellow]Voltando para modo texto.[/yellow]")
-            settings = replace(settings, stt_mode="text")
-            stt = build_stt(settings, console=console)
+            settings, stt = recover_from_stt_error(console=console, settings=settings, exc=exc)
             continue
 
         if not user_message:
             continue
 
         # Comandos locais para workers (não passam por router/LLM).
-        if worker_mgr is not None:
-            um = user_message.strip()
-            if um.lower() in {"jobs", "job", "trabalhos"}:
-                jobs = worker_mgr.list_jobs()
-                if not jobs:
-                    console.print("Agente> Nenhum job em background.")
-                    continue
-                lines = ["== Jobs =="]
-                now = time.time()
-                for j in jobs[-12:]:
-                    age = now - float(j.created_ts)
-                    lines.append(f"- {j.job_id} {j.name} status={j.status} age_s={age:.0f}")
-                console.print(Panel("\n".join(lines), title="Workers"))
-                continue
-
-            mjob = re.fullmatch(r"job\s+([0-9a-fA-F]{6,12})", um.strip(), flags=re.IGNORECASE)
-            if mjob:
-                jid = mjob.group(1)
-                info = worker_mgr.get_info(jid)
-                if info is None:
-                    console.print("Agente> Job não encontrado.")
-                else:
-                    console.print(
-                        Panel(
-                            f"job_id={info.job_id}\nname={info.name}\nstatus={info.status}\ndone={info.done}",
-                            title="Job",
-                        )
-                    )
-                continue
-
-            mcancel = re.fullmatch(r"cancel\s+([0-9a-fA-F]{6,12})", um.strip(), flags=re.IGNORECASE)
-            if mcancel:
-                jid = mcancel.group(1)
-                ok = worker_mgr.cancel(jid)
-                console.print("Agente> " + ("Ok, tentei cancelar." if ok else "Não consegui cancelar (talvez já esteja rodando/finalizado)."))
-                continue
+        if handle_worker_commands(console=console, user_message=user_message, worker_mgr=worker_mgr):
+            continue
 
         # Se a hotkey foi pressionada, capturamos contexto de tela antes de rotear.
         if screen_hotkey_flag.is_set():
             screen_hotkey_flag.clear()
-            try:
-                # Consideramos hotkey como pedido explícito de visão.
-                console.print("[dim]Capturando contexto de tela (hotkey)...[/dim]")
-                # screenshot
-                res1 = registry.run("screen.screenshot", {})
-                if res1.status == "ok":
-                    hotkey_image_path = "data/screenshots/latest.png"
-                memory.append(
-                    "tool_output",
-                    {
-                        "tool": "screen.screenshot",
-                        "args": {},
-                        "attempt": 1,
-                        "status": res1.status,
-                        "output": res1.output,
-                        "error": res1.error,
-                    },
-                )
-                # OCR (usa latest.png por padrão no tool)
-                res2 = registry.run("screen.ocr", {})
-                if res2.status == "ok":
-                    hotkey_ocr_text = (res2.output or "").strip() or None
-                memory.append(
-                    "tool_output",
-                    {
-                        "tool": "screen.ocr",
-                        "args": {},
-                        "attempt": 1,
-                        "status": res2.status,
-                        "output": res2.output,
-                        "error": res2.error,
-                    },
-                )
-                if res2.status == "ok" and (res2.output or "").strip():
-                    console.print(Panel(str(res2.output)[:2000], title="OCR (hotkey)"))
-
-                # Evento compacto para o LLM entender que o usuário chamou via hotkey.
-                memory.append(
-                    "screen_context",
-                    {
-                        "image_path": hotkey_image_path,
-                        "ocr": hotkey_ocr_text,
-                        "note": "Usuário acionou hotkey (Ctrl+Space) para ajuda contextual da tela.",
-                    },
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Falha capturando contexto de tela")
-                console.print(f"[yellow]Falha ao capturar tela:[/yellow] {exc}")
+            hotkey_image_path, hotkey_ocr_text = capture_hotkey_screen_context(
+                console=console,
+                registry=registry,
+                memory=memory,
+            )
 
         if stt.is_voice:
             # Transparência: mostra o texto transcrito antes de agir.
@@ -685,16 +667,38 @@ def run_brain_loop(settings: Settings) -> None:
                 console.print("[dim]Auto-programação habilitada nesta sessão.[/dim]")
 
         if settings.router_mode == "llm" and plan.tool_calls:
-            response_text = _execute_plan_react(
-                console,
-                settings,
-                registry,
-                plan,
-                memory,
-                approvals=approvals,
-                remember=getattr(settings, "hitl_remember_approvals", False),
-                worker_mgr=worker_mgr,
-            )
+            if getattr(settings, "async_enabled", False):
+                metrics = Metrics()
+                response_text = asyncio.run(
+                    _execute_plan_react_async(
+                        console,
+                        settings,
+                        registry,
+                        plan,
+                        memory,
+                        approvals=approvals,
+                        remember=getattr(settings, "hitl_remember_approvals", False),
+                        worker_mgr=worker_mgr,
+                        policy=policy,
+                        snapshot_mgr=snapshot_mgr,
+                        runlog=runlog,
+                        metrics=metrics,
+                    )
+                )
+            else:
+                response_text = _execute_plan_react(
+                    console,
+                    settings,
+                    registry,
+                    plan,
+                    memory,
+                    approvals=approvals,
+                    remember=getattr(settings, "hitl_remember_approvals", False),
+                    worker_mgr=worker_mgr,
+                    policy=policy,
+                    snapshot_mgr=snapshot_mgr,
+                    runlog=runlog,
+                )
         else:
             response_text = _execute_plan(
                 console,
@@ -1161,6 +1165,108 @@ def _run_tool_with_retry(console: Console, settings: Settings, registry, call: T
     return last
 
 
+async def _run_tool_with_retry_async(
+    console: Console,
+    settings: Settings,
+    registry,
+    call: ToolCall,
+    memory: JsonlMemoryStore,
+    *,
+    metrics: Metrics | None = None,
+):
+    """Versão async (opt-in) que preserva semântica.
+
+    - Para tools síncronas, executa em thread via asyncio.to_thread.
+    - Mantém retry/backoff e writes no memory exatamente como a versão sync.
+    """
+
+    last = None
+    for attempt in range(1, settings.retry_max_attempts + 1):
+        if attempt > 1:
+            sleep_s = settings.retry_backoff_s * (attempt - 1)
+            if sleep_s:
+                await asyncio.sleep(sleep_s)
+
+        t = metrics.timer() if metrics is not None else None
+        run_async = getattr(registry, "run_async", None)
+        if callable(run_async):
+            result = await run_async(call.tool_name, call.args)  # type: ignore[misc]
+        else:
+            result = await asyncio.to_thread(registry.run, call.tool_name, call.args)
+        if metrics is not None and t is not None:
+            metrics.observe_ms(f"tool.{call.tool_name}.ms", t)
+            metrics.inc(f"tool.{call.tool_name}.calls")
+            metrics.inc(f"tool.{call.tool_name}.ok" if result.status == "ok" else f"tool.{call.tool_name}.err")
+        memory.append(
+            "tool_output",
+            {
+                "tool": call.tool_name,
+                "args": call.args,
+                "attempt": attempt,
+                "status": result.status,
+                "output": result.output,
+                "error": result.error,
+            },
+        )
+
+        if result.status == "ok":
+            return result
+
+        last = result
+        if not _should_retry(settings, call.tool_name, str(result.error or "")):
+            break
+
+        console.print(
+            f"[yellow]Tool falhou (tentativa {attempt}/{settings.retry_max_attempts})[/yellow]: {call.tool_name}: {result.error}"
+        )
+
+    assert last is not None
+    return last
+
+
+async def _execute_plan_react_async(
+    console: Console,
+    settings: Settings,
+    registry,
+    plan: Plan,
+    memory: JsonlMemoryStore,
+    approvals: ApprovalStore | None = None,
+    remember: bool = False,
+    *,
+    worker_mgr: WorkerManager | None = None,
+    policy: PolicyEngine | None = None,
+    snapshot_mgr: SnapshotManager | None = None,
+    runlog: RunLogger | None = None,
+    metrics: Metrics | None = None,
+) -> str | None:
+    run_tool_with_retry = _run_tool_with_retry_async
+    if metrics is not None:
+        async def _run_tool_with_retry_wrapped(console: Console, settings: Settings, registry, call: ToolCall, memory: JsonlMemoryStore):
+            return await _run_tool_with_retry_async(console, settings, registry, call, memory, metrics=metrics)
+
+        run_tool_with_retry = _run_tool_with_retry_wrapped
+    return await _react_execute_plan_react_async(
+        console,
+        settings,
+        registry,
+        plan,
+        memory,
+        approvals=approvals,
+        remember=remember,
+        worker_mgr=worker_mgr,
+        policy=policy,
+        snapshot_mgr=snapshot_mgr,
+        runlog=runlog,
+        normalize_plan_args=_normalize_plan_args,
+        preflight_validate_plan=_preflight_validate_plan,
+        effective_risk_for_plan=_effective_risk_for_plan,
+        run_tool_with_retry_async=run_tool_with_retry,
+        build_router_context_messages=_build_router_context_messages,
+        route_llm_async=route_llm_async,
+        route_with_registry_async=route_with_registry_async,
+    )
+
+
 def _execute_plan(
     console: Console,
     settings: Settings,
@@ -1175,6 +1281,7 @@ def _execute_plan(
     # Per-run logging (local JSONL)
     run = None
     rl = None
+    metrics = Metrics()
     if getattr(settings, "runlog_enabled", True):
         try:
             rl = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
@@ -1246,6 +1353,8 @@ def _execute_plan(
         except Exception as exc:  # noqa: BLE001
             # Fail-open: if policy cannot be evaluated, we don't block execution.
             memory.append("policy_error", {"error": str(exc)})
+
+    metrics.inc("plan.tools", len(normalized_plan.tool_calls or []))
 
     if effective_plan.risk != plan.risk:
         memory.append(
@@ -1335,7 +1444,11 @@ def _execute_plan(
     # Execução sequencial (com retry opcional).
     saw_any_tool_output = False
     for call in normalized_plan.tool_calls:
+        t_call = metrics.timer()
         result = _run_tool_with_retry(console, settings, registry, call, memory)
+        metrics.observe_ms(f"tool.{call.tool_name}.ms", t_call)
+        metrics.inc(f"tool.{call.tool_name}.calls")
+        metrics.inc(f"tool.{call.tool_name}.ok" if result.status == "ok" else f"tool.{call.tool_name}.err")
         if rl is not None and run is not None:
             try:
                 rl.append(
@@ -1357,6 +1470,7 @@ def _execute_plan(
             if rl is not None and run is not None:
                 try:
                     rl.append(run, "run_failed", {"tool": call.tool_name, "error": result.error})
+                    rl.append(run, "metrics", metrics.snapshot())
                 except Exception:
                     pass
             return None
@@ -1378,6 +1492,7 @@ def _execute_plan(
         if rl is not None and run is not None:
             try:
                 rl.append(run, "final_response", {"text": normalized_plan.final_response})
+                rl.append(run, "metrics", metrics.snapshot())
             except Exception:
                 pass
         return normalized_plan.final_response
@@ -1396,6 +1511,7 @@ def _execute_plan(
                 if rl is not None and run is not None:
                     try:
                         rl.append(run, "final_response", {"text": response_text, "fallback": True})
+                        rl.append(run, "metrics", metrics.snapshot())
                     except Exception:
                         pass
                 return response_text
@@ -1407,6 +1523,7 @@ def _execute_plan(
         if rl is not None and run is not None:
             try:
                 rl.append(run, "final_response", {"text": "Feito."})
+                rl.append(run, "metrics", metrics.snapshot())
             except Exception:
                 pass
         return "Feito."
@@ -1422,20 +1539,37 @@ def _execute_plan_react(
     remember: bool = False,
     *,
     worker_mgr: WorkerManager | None = None,
+    policy: PolicyEngine | None = None,
+    snapshot_mgr: SnapshotManager | None = None,
+    runlog: RunLogger | None = None,
 ) -> str | None:
-    """Executa tools em loop, replanejando com base em tool outputs (ReAct-ish).
-
-    Política:
-    - Executa no máximo alguns passos para evitar loops.
-    - Pede HITL em cada tool call (porque o plano pode mudar a cada passo).
-    """
+    return _react_execute_plan_react(
+        console,
+        settings,
+        registry,
+        plan,
+        memory,
+        approvals=approvals,
+        remember=remember,
+        worker_mgr=worker_mgr,
+        policy=policy,
+        snapshot_mgr=snapshot_mgr,
+        runlog=runlog,
+        normalize_plan_args=_normalize_plan_args,
+        preflight_validate_plan=_preflight_validate_plan,
+        effective_risk_for_plan=_effective_risk_for_plan,
+        run_tool_with_retry=_run_tool_with_retry,
+        build_router_context_messages=_build_router_context_messages,
+        route_llm=route_llm,
+        route_with_registry=route_with_registry,
+    )
 
     # Per-run logging (local JSONL)
     run = None
     rl = None
     if getattr(settings, "runlog_enabled", True):
         try:
-            rl = RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
+            rl = runlog or RunLogger(base_dir=str(getattr(settings, "runlog_dir", "data/runs") or "data/runs"))
             run = rl.start(intent=str(plan.intent or "react"))
             rl.append(run, "plan", {"intent": plan.intent, "risk": str(plan.risk), "tool_calls": [c.model_dump() for c in plan.tool_calls]})
         except Exception:
@@ -1457,195 +1591,323 @@ def _execute_plan_react(
     # Mantém um rastro curto para dar ao LLM.
     trace_messages: list[dict[str, str]] = []
 
+    class _ReactState(Enum):
+        INIT_STEP = auto()
+        PREFLIGHT = auto()
+        POLICY = auto()
+        HITL = auto()
+        SNAPSHOT = auto()
+        RUN_TOOL = auto()
+        SHORTCIRCUIT = auto()
+        TRACE_AND_CHECKPOINT = auto()
+        REPLAN = auto()
+
     for step in range(1, max_steps + 1):
-        # Se o plano atual já não tem tools, finalizamos.
-        if not current_plan.tool_calls:
-            text = (current_plan.final_response or "").strip() or "Feito."
-            console.print(f"Agente> {text}")
-            memory.append("agent_response", {"text": text})
-            return text
+        state = _ReactState.INIT_STEP
 
-        # Executa apenas 1 tool por passo.
-        call = current_plan.tool_calls[0]
-        step_plan = current_plan.model_copy(update={"tool_calls": [call]})
+        call: ToolCall | None = None
+        normalized_plan: Plan | None = None
+        result = None
+        replanning_ctx: list[dict[str, str]] | None = None
 
-        # Preflight + HITL por passo.
-        effective_risk = _effective_risk_for_plan(step_plan, registry, settings=settings)
-        effective_plan = step_plan if effective_risk == step_plan.risk else step_plan.model_copy(update={"risk": effective_risk})
-        normalized_plan, _ = _normalize_plan_args(effective_plan, settings=settings)
+        while True:
+            if state is _ReactState.INIT_STEP:
+                # Se o plano atual já não tem tools, finalizamos.
+                if not current_plan.tool_calls:
+                    text = (current_plan.final_response or "").strip() or "Feito."
+                    console.print(f"Agente> {text}")
+                    memory.append("agent_response", {"text": text})
+                    return text
 
-        preflight_error = _preflight_validate_plan(normalized_plan, registry, settings=settings)
-        if preflight_error:
-            console.print(f"[red]Preflight error:[/red] {preflight_error}")
-            console.print("Agente> Não executei por segurança.")
-            if rl is not None and run is not None:
-                try:
-                    rl.append(run, "preflight_error", {"error": preflight_error, "step": step})
-                except Exception:
-                    pass
-            return None
+                # Executa apenas 1 tool por passo.
+                call = current_plan.tool_calls[0]
+                state = _ReactState.PREFLIGHT
+                continue
 
-        if getattr(settings, "ui_show_react_steps", False):
-            console.print(Panel.fit(f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}", title="Plano"))
+            if state is _ReactState.PREFLIGHT:
+                assert call is not None
+                step_plan = current_plan.model_copy(update={"tool_calls": [call]})
 
-        # Policy enforcement por passo (antes de HITL)
-        if getattr(settings, "policy_enabled", True):
-            try:
-                eng = PolicyEngine(path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json"))
-                eng.load()
-                ok, decisions = eng.decide_plan([call], plan_risk=normalized_plan.risk)
-                if not ok:
-                    denied = [d for d in decisions if not d.allowed]
-                    reason = denied[0].reason if denied else "policy denied"
-                    console.print(Panel.fit(f"Policy bloqueou a tool.\nMotivo: {reason}", title="Policy"))
-                    memory.append("policy_denied", {"tool": call.tool_name, "reason": reason, "step": step})
+                # Preflight + HITL por passo.
+                effective_risk = _effective_risk_for_plan(step_plan, registry, settings=settings)
+                effective_plan = (
+                    step_plan
+                    if effective_risk == step_plan.risk
+                    else step_plan.model_copy(update={"risk": effective_risk})
+                )
+                normalized_plan, _ = _normalize_plan_args(effective_plan, settings=settings)
+
+                preflight_error = _preflight_validate_plan(normalized_plan, registry, settings=settings)
+                if preflight_error:
+                    console.print(f"[red]Preflight error:[/red] {preflight_error}")
+                    console.print("Agente> Não executei por segurança.")
                     if rl is not None and run is not None:
                         try:
-                            rl.append(run, "policy_denied", {"tool": call.tool_name, "reason": reason, "step": step})
+                            rl.append(run, "preflight_error", {"error": preflight_error, "step": step})
                         except Exception:
                             pass
                     return None
-            except Exception as exc:  # noqa: BLE001
-                memory.append("policy_error", {"error": str(exc), "step": step})
 
-        if not require_approval(
-            normalized_plan,
-            enabled=settings.hitl_enabled,
-            min_risk=settings.hitl_min_risk,
-            require_token=settings.hitl_require_token,
-            remember=remember,
-            approvals=approvals,
-        ):
-            console.print("Agente> Ok, não vou executar isso.")
-            if rl is not None and run is not None:
-                try:
-                    rl.append(run, "hitl_denied", {"tool": call.tool_name, "step": step})
-                except Exception:
-                    pass
-            return None
+                if getattr(settings, "ui_show_react_steps", False):
+                    console.print(
+                        Panel.fit(
+                            f"ReAct step {step}/{max_steps}\nTool: {call.tool_name}\nRisk: {normalized_plan.risk}",
+                            title="Plano",
+                        )
+                    )
 
-        # Snapshot automático por passo (best-effort)
-        if (
-            getattr(settings, "snapshots_enabled", True)
-            and getattr(settings, "snapshots_auto_before_high_risk", True)
-            and normalized_plan.risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}
-        ):
-            try:
-                mgr = SnapshotManager(snapshots_dir=str(getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"))
-                info = mgr.create(label=f"react_{call.tool_name}"[:40])
-                memory.append("snapshot_created", {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step})
-                if rl is not None and run is not None:
+                state = _ReactState.POLICY
+                continue
+
+            if state is _ReactState.POLICY:
+                assert call is not None
+                assert normalized_plan is not None
+
+                # Policy enforcement por passo (antes de HITL)
+                if getattr(settings, "policy_enabled", True):
                     try:
-                        rl.append(run, "snapshot_created", {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step})
+                        eng = policy
+                        if eng is None:
+                            eng = PolicyEngine(
+                                path=str(getattr(settings, "policy_path", "data/policy.json") or "data/policy.json")
+                            )
+                            eng.load()
+                        ok, decisions = eng.decide_plan([call], plan_risk=normalized_plan.risk)
+                        if not ok:
+                            denied = [d for d in decisions if not d.allowed]
+                            reason = denied[0].reason if denied else "policy denied"
+                            console.print(Panel.fit(f"Policy bloqueou a tool.\nMotivo: {reason}", title="Policy"))
+                            memory.append(
+                                "policy_denied",
+                                {"tool": call.tool_name, "reason": reason, "step": step},
+                            )
+                            if rl is not None and run is not None:
+                                try:
+                                    rl.append(
+                                        run,
+                                        "policy_denied",
+                                        {"tool": call.tool_name, "reason": reason, "step": step},
+                                    )
+                                except Exception:
+                                    pass
+                            return None
+                    except Exception as exc:  # noqa: BLE001
+                        memory.append("policy_error", {"error": str(exc), "step": step})
+
+                state = _ReactState.HITL
+                continue
+
+            if state is _ReactState.HITL:
+                assert normalized_plan is not None
+                assert call is not None
+
+                if not require_approval(
+                    normalized_plan,
+                    enabled=settings.hitl_enabled,
+                    min_risk=settings.hitl_min_risk,
+                    require_token=settings.hitl_require_token,
+                    remember=remember,
+                    approvals=approvals,
+                ):
+                    console.print("Agente> Ok, não vou executar isso.")
+                    if rl is not None and run is not None:
+                        try:
+                            rl.append(run, "hitl_denied", {"tool": call.tool_name, "step": step})
+                        except Exception:
+                            pass
+                    return None
+
+                state = _ReactState.SNAPSHOT
+                continue
+
+            if state is _ReactState.SNAPSHOT:
+                assert normalized_plan is not None
+                assert call is not None
+
+                # Snapshot automático por passo (best-effort)
+                if (
+                    getattr(settings, "snapshots_enabled", True)
+                    and getattr(settings, "snapshots_auto_before_high_risk", True)
+                    and normalized_plan.risk in {RiskLevel.HIGH, RiskLevel.CRITICAL}
+                ):
+                    try:
+                        mgr = snapshot_mgr
+                        if mgr is None:
+                            mgr = SnapshotManager(
+                                snapshots_dir=str(
+                                    getattr(settings, "snapshots_dir", "data/snapshots") or "data/snapshots"
+                                )
+                            )
+                        info = mgr.create(label=f"react_{call.tool_name}"[:40])
+                        memory.append(
+                            "snapshot_created",
+                            {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step},
+                        )
+                        if rl is not None and run is not None:
+                            try:
+                                rl.append(
+                                    run,
+                                    "snapshot_created",
+                                    {"snapshot_id": info.snapshot_id, "tool": call.tool_name, "step": step},
+                                )
+                            except Exception:
+                                pass
                     except Exception:
                         pass
-            except Exception:
-                pass
 
-        result = _run_tool_with_retry(console, settings, registry, call, memory)
-        if rl is not None and run is not None:
-            try:
-                rl.append(
-                    run,
-                    "tool_result",
+                state = _ReactState.RUN_TOOL
+                continue
+
+            if state is _ReactState.RUN_TOOL:
+                assert call is not None
+
+                result = _run_tool_with_retry(console, settings, registry, call, memory)
+                if rl is not None and run is not None:
+                    try:
+                        rl.append(
+                            run,
+                            "tool_result",
+                            {
+                                "tool": call.tool_name,
+                                "args": call.args,
+                                "status": result.status,
+                                "output": result.output,
+                                "error": result.error,
+                                "step": step,
+                            },
+                        )
+                    except Exception:
+                        pass
+
+                if result.status == "error":
+                    console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
+
+                if getattr(settings, "ui_show_tool_outputs", True) and result.output:
+                    out = result.output.strip()
+                    if len(out) > 2000:
+                        out = out[:2000] + "\n... [truncado]"
+                    console.print(Panel(out, title=f"Tool: {call.tool_name}"))
+
+                state = _ReactState.SHORTCIRCUIT
+                continue
+
+            if state is _ReactState.SHORTCIRCUIT:
+                assert call is not None
+                assert result is not None
+
+                # Short-circuit: deterministic single-shot tool finished successfully.
+                if (
+                    result.status == "ok"
+                    and call.tool_name in single_shot_tools
+                    and (current_plan.intent or "").strip() == call.tool_name
+                ):
+                    text = (result.output or "").strip() or "Feito."
+                    console.print(f"Agente> {text}")
+                    memory.append("agent_response", {"text": text})
+                    return text
+
+                state = _ReactState.TRACE_AND_CHECKPOINT
+                continue
+
+            if state is _ReactState.TRACE_AND_CHECKPOINT:
+                assert call is not None
+                assert result is not None
+
+                # Alimenta o LLM com um resumo do que aconteceu.
+                out_short = (result.output or "").strip()
+                if len(out_short) > 1200:
+                    out_short = out_short[:1200] + "\n... [truncado]"
+                err_short = str(result.error or "").strip()
+                if len(err_short) > 800:
+                    err_short = err_short[:800] + "... [truncado]"
+
+                trace = {
+                    "tool": call.tool_name,
+                    "args": call.args,
+                    "status": result.status,
+                    "output": out_short,
+                    "error": err_short,
+                }
+                trace_messages.append(
+                    {"role": "assistant", "content": "TOOL_RESULT " + json.dumps(trace, ensure_ascii=False)}
+                )
+                if len(trace_messages) > 8:
+                    trace_messages = trace_messages[-8:]
+
+                # Checkpoint leve (autonomia): registra progresso e mostra status.
+                if (
+                    getattr(settings, "autonomy_enabled", False)
+                    and checkpoint_every
+                    and (step % checkpoint_every == 0)
+                    and step < max_steps
+                ):
+                    memory.append(
+                        "autonomy_checkpoint",
+                        {
+                            "step": step,
+                            "max_steps": max_steps,
+                            "last_tool": call.tool_name,
+                            "last_status": result.status,
+                        },
+                    )
+                    console.print(
+                        Panel.fit(
+                            f"Checkpoint: step {step}/{max_steps}\nÚltima tool: {call.tool_name} ({result.status})",
+                            title="Autonomia",
+                        )
+                    )
+
+                # Se o plano original tinha mais tools, guardamos um hint para o LLM.
+                if len(current_plan.tool_calls) > 1:
+                    trace_messages.append(
+                        {
+                            "role": "assistant",
+                            "content": "HINT: o plano anterior continha mais tool_calls; replaine considerando o objetivo original.",
+                        }
+                    )
+                    if len(trace_messages) > 8:
+                        trace_messages = trace_messages[-8:]
+
+                state = _ReactState.REPLAN
+                continue
+
+            if state is _ReactState.REPLAN:
+                # Replaneja via LLM (mantendo o pedido original e fornecendo o rastro).
+                # Importante: também injeta contexto recente da conversa para manter coerência do assunto.
+                conv_ctx = _build_router_context_messages(
+                    memory,
+                    current_user_message=original_user_message,
+                    limit_messages=8,
+                )
+                replanning_ctx = conv_ctx + trace_messages
+                new_plan = route_llm(
+                    settings,
+                    original_user_message,
+                    context_messages=replanning_ctx,
+                    registry=registry,
+                )
+                if new_plan is None:
+                    # Fallback: não aborta por rate limit/quota. Cai para heurística (determinística).
+                    safe_settings = replace(settings, router_mode="heuristic")
+                    new_plan = route_with_registry(
+                        safe_settings,
+                        original_user_message,
+                        registry=registry,
+                        context_messages=replanning_ctx,
+                    )
+
+                memory.append(
+                    "plan",
                     {
-                        "tool": call.tool_name,
-                        "args": call.args,
-                        "status": result.status,
-                        "output": result.output,
-                        "error": result.error,
-                        "step": step,
+                        "intent": new_plan.intent,
+                        "risk": str(new_plan.risk),
+                        "tool_calls": [c.model_dump() for c in new_plan.tool_calls],
                     },
                 )
-            except Exception:
-                pass
-        if result.status == "error":
-            console.print(f"[red]Tool error:[/red] {call.tool_name}: {result.error}")
+                current_plan = new_plan
+                break
 
-        if getattr(settings, "ui_show_tool_outputs", True) and result.output:
-            out = result.output.strip()
-            if len(out) > 2000:
-                out = out[:2000] + "\n... [truncado]"
-            console.print(Panel(out, title=f"Tool: {call.tool_name}"))
-
-        # Short-circuit: deterministic single-shot tool finished successfully.
-        if (
-            result.status == "ok"
-            and call.tool_name in single_shot_tools
-            and (current_plan.intent or "").strip() == call.tool_name
-        ):
-            text = (result.output or "").strip() or "Feito."
-            console.print(f"Agente> {text}")
-            memory.append("agent_response", {"text": text})
-            return text
-
-        # Alimenta o LLM com um resumo do que aconteceu.
-        out_short = (result.output or "").strip()
-        if len(out_short) > 1200:
-            out_short = out_short[:1200] + "\n... [truncado]"
-        err_short = str(result.error or "").strip()
-        if len(err_short) > 800:
-            err_short = err_short[:800] + "... [truncado]"
-
-        trace = {
-            "tool": call.tool_name,
-            "args": call.args,
-            "status": result.status,
-            "output": out_short,
-            "error": err_short,
-        }
-        trace_messages.append({"role": "assistant", "content": "TOOL_RESULT " + json.dumps(trace, ensure_ascii=False)})
-        if len(trace_messages) > 8:
-            trace_messages = trace_messages[-8:]
-
-        # Checkpoint leve (autonomia): registra progresso e mostra status.
-        if getattr(settings, "autonomy_enabled", False) and checkpoint_every and (step % checkpoint_every == 0) and step < max_steps:
-            memory.append(
-                "autonomy_checkpoint",
-                {
-                    "step": step,
-                    "max_steps": max_steps,
-                    "last_tool": call.tool_name,
-                    "last_status": result.status,
-                },
-            )
-            console.print(Panel.fit(f"Checkpoint: step {step}/{max_steps}\nÚltima tool: {call.tool_name} ({result.status})", title="Autonomia"))
-
-        # Se o plano original tinha mais tools, guardamos um hint para o LLM.
-        if len(current_plan.tool_calls) > 1:
-            trace_messages.append(
-                {
-                    "role": "assistant",
-                    "content": "HINT: o plano anterior continha mais tool_calls; replaine considerando o objetivo original.",
-                }
-            )
-            if len(trace_messages) > 8:
-                trace_messages = trace_messages[-8:]
-
-        # Replaneja via LLM (mantendo o pedido original e fornecendo o rastro).
-        # Importante: também injeta contexto recente da conversa para manter coerência do assunto.
-        conv_ctx = _build_router_context_messages(memory, current_user_message=original_user_message, limit_messages=8)
-        replanning_ctx = conv_ctx + trace_messages
-        new_plan = route_llm(settings, original_user_message, context_messages=replanning_ctx, registry=registry)
-        if new_plan is None:
-            # Fallback: não aborta por rate limit/quota. Cai para heurística (determinística).
-            safe_settings = replace(settings, router_mode="heuristic")
-            new_plan = route_with_registry(
-                safe_settings,
-                original_user_message,
-                registry=registry,
-                context_messages=replanning_ctx,
-            )
-
-        memory.append(
-            "plan",
-            {
-                "intent": new_plan.intent,
-                "risk": str(new_plan.risk),
-                "tool_calls": [c.model_dump() for c in new_plan.tool_calls],
-            },
-        )
-        current_plan = new_plan
+            raise RuntimeError(f"Unhandled ReAct state: {state}")
 
     console.print("Agente> Parei para não entrar em loop. Se quiser, descreva o que você viu/obteve e eu continuo.")
     memory.append(

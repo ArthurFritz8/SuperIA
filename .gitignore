@@ -16,12 +16,19 @@ build/
 # Env
 .env
 
+# Editor (local)
+.vscode/
+
 # Data
 /data/chroma/
 /data/logs/
 /data/screenshots/
 /data/tmp/
 /data/memory/
+data/router_cache.sqlite
+
+# Package data (runtime)
+omniscia/data/
 
 # Run logs / snapshots (gerados em tempo de execução)
 /data/runs/*

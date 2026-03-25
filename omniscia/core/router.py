@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import unicodedata
+import asyncio
 from datetime import datetime
 from collections import OrderedDict
 from typing import Any
@@ -23,6 +24,9 @@ from urllib.parse import quote_plus
 
 from omniscia.core.config import Settings
 from omniscia.core.heuristic_handlers import run_heuristic_handlers
+from omniscia.core.router_cache import build_router_cache_from_env, make_cache_key_namespace
+from omniscia.core.router_prompt_data import load_schema_hints, load_static_tools_block
+from omniscia.core.tool_rag import build_shortlister_from_env
 from omniscia.core.tools import ToolRegistry
 from omniscia.core.types import Plan, RiskLevel, ToolCall
 
@@ -71,6 +75,10 @@ class _LRUCache:
 
 _HEURISTIC_CACHE = _LRUCache(_env_int("OMNI_HEURISTIC_ROUTE_CACHE", 512))
 _LLM_ROUTE_CACHE = _LRUCache(_env_int("OMNI_LLM_ROUTE_CACHE", 128))
+
+# Opt-in caches / indexes
+_SQLITE_CACHE = build_router_cache_from_env()
+_TOOL_SHORTLISTER = build_shortlister_from_env()
 
 
 def _registry_fingerprint(registry: ToolRegistry | None) -> str:
@@ -451,6 +459,9 @@ def route_with_registry(
     *,
     registry: ToolRegistry,
     context_messages: list[dict[str, str]] | None = None,
+    metrics: object | None = None,
+    runlog: object | None = None,
+    run: object | None = None,
 ) -> Plan:
     """Como `route()`, mas com conhecimento das tools registradas.
 
@@ -480,16 +491,38 @@ def route_with_registry(
 
     # Heurística pode ser cacheada apenas quando NÃO há contexto.
     heuristic: Plan
+    t_route = None
+    try:
+        if metrics is not None:
+            t_route = metrics.timer()
+    except Exception:
+        t_route = None
     if not context_messages:
         cache_key = "h1:" + _normalize(user_message)
         cached = _HEURISTIC_CACHE.get(cache_key)
         if cached is not None:
             heuristic = cached
+            try:
+                if metrics is not None:
+                    metrics.inc("router.heuristic.cache_hit")
+            except Exception:
+                pass
         else:
             heuristic = _route_heuristic(user_message, context_messages=context_messages)
             _HEURISTIC_CACHE.put(cache_key, heuristic)
+            try:
+                if metrics is not None:
+                    metrics.inc("router.heuristic.cache_miss")
+            except Exception:
+                pass
     else:
         heuristic = _route_heuristic(user_message, context_messages=context_messages)
+
+    try:
+        if metrics is not None and t_route is not None:
+            metrics.observe_ms("router.heuristic.ms", t_route)
+    except Exception:
+        pass
 
     # Se a heuristic escolheu tools que não existem neste runtime, devolvemos orientação.
     # (isso acontece quando dependências opcionais não foram instaladas)
@@ -534,11 +567,38 @@ def route_with_registry(
             heuristic_fallback=heuristic,
             registry=registry,
             context_messages=context_messages,
+            metrics=metrics,
+            runlog=runlog,
+            run=run,
         )
         if plan is not None:
             return plan
 
     return heuristic
+
+
+async def route_with_registry_async(
+    settings: Settings,
+    user_message: str,
+    *,
+    registry: ToolRegistry,
+    context_messages: list[dict[str, str]] | None = None,
+    metrics: object | None = None,
+    runlog: object | None = None,
+    run: object | None = None,
+) -> Plan:
+    """Wrapper async (opt-in) para `route_with_registry` via thread."""
+
+    return await asyncio.to_thread(
+        route_with_registry,
+        settings,
+        user_message,
+        registry=registry,
+        context_messages=context_messages,
+        metrics=metrics,
+        runlog=runlog,
+        run=run,
+    )
 
 
 def route_llm(
@@ -548,6 +608,9 @@ def route_llm(
     context_messages: list[dict[str, str]] | None = None,
     heuristic_fallback: Plan | None = None,
     registry: ToolRegistry | None = None,
+    metrics: object | None = None,
+    runlog: object | None = None,
+    run: object | None = None,
 ) -> Plan | None:
     """Roteia via LLM (quando configurado), opcionalmente com contexto adicional.
 
@@ -567,16 +630,50 @@ def route_llm(
             provider = str(getattr(settings, "llm_provider", "") or "").strip().lower()
             model = str(getattr(settings, "llm_model", "") or "").strip()
             base_url = str(getattr(settings, "llm_base_url", "") or "").strip()
-            cache_key = "l1:" + "|".join(
-                [provider, model, base_url, _registry_fingerprint(registry), _normalize(user_message)]
+            ns = make_cache_key_namespace(
+                provider=provider,
+                model=model,
+                base_url=base_url,
+                registry_fingerprint=_registry_fingerprint(registry),
             )
+            cache_key = "l1:" + ns + "|" + _normalize(user_message)
     except Exception:
         cache_key = ""
 
     if cache_key:
+        # 1) Cache persistente (se habilitado)
+        if _SQLITE_CACHE is not None:
+            # Best-effort: evita crescimento infinito do SQLite.
+            try:
+                keep_last_n = int(os.getenv("OMNI_ROUTER_SQLITE_CACHE_KEEP_LAST_N", "5000") or "5000")
+                _SQLITE_CACHE.maybe_maintain(keep_last_n=keep_last_n)
+            except Exception:
+                pass
+            cached_p = _SQLITE_CACHE.get(cache_key)
+            if cached_p is not None:
+                try:
+                    if metrics is not None:
+                        metrics.inc("router.llm.sqlite_hit")
+                except Exception:
+                    pass
+                return cached_p
+
+        # 2) Cache em memória
         cached = _LLM_ROUTE_CACHE.get(cache_key)
         if cached is not None:
+            try:
+                if metrics is not None:
+                    metrics.inc("router.llm.mem_hit")
+            except Exception:
+                pass
             return cached
+
+    t_llm = None
+    try:
+        if metrics is not None:
+            t_llm = metrics.timer()
+    except Exception:
+        t_llm = None
 
     llm_kwargs: dict[str, Any] = {}
     if registry is not None:
@@ -587,11 +684,35 @@ def route_llm(
         (context_messages or []) + [{"role": "user", "content": str(user_message or "").strip()}],
         **llm_kwargs,
     )
+    try:
+        if metrics is not None and t_llm is not None:
+            metrics.observe_ms("router.llm.ms", t_llm)
+            metrics.inc("router.llm.calls")
+    except Exception:
+        pass
     if plan is None:
         return None
 
+    if runlog is not None and run is not None:
+        try:
+            runlog.append(
+                run,
+                "router_decision",
+                {
+                    "mode": "llm",
+                    "intent": plan.intent,
+                    "risk": str(plan.risk),
+                    "tool_calls": [c.model_dump() for c in (plan.tool_calls or [])],
+                    "cached": False,
+                },
+            )
+        except Exception:
+            pass
+
     if cache_key:
         _LLM_ROUTE_CACHE.put(cache_key, plan)
+        if _SQLITE_CACHE is not None:
+            _SQLITE_CACHE.put(cache_key, plan)
 
     norm = _normalize(user_message)
 
@@ -703,6 +824,32 @@ def route_llm(
     return plan
 
 
+async def route_llm_async(
+    settings: Settings,
+    user_message: str,
+    *,
+    context_messages: list[dict[str, str]] | None = None,
+    heuristic_fallback: Plan | None = None,
+    registry: ToolRegistry | None = None,
+    metrics: object | None = None,
+    runlog: object | None = None,
+    run: object | None = None,
+) -> Plan | None:
+    """Wrapper async (opt-in) para `route_llm` via thread."""
+
+    return await asyncio.to_thread(
+        route_llm,
+        settings,
+        user_message,
+        context_messages=context_messages,
+        heuristic_fallback=heuristic_fallback,
+        registry=registry,
+        metrics=metrics,
+        runlog=runlog,
+        run=run,
+    )
+
+
 def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan:
     msg = user_message.strip()
     norm = _normalize(msg)
@@ -716,21 +863,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
     except Exception:
         # Fallback silencioso para manter robustez (o legado cobre o resto)
         pass
-
-    # Entradas só-numéricas (usuário tentando "escolher um passo" ou responder menu).
-    # O MVP não tem UX de menu por números, então damos um caminho claro.
-    if re.fullmatch(r"\d{1,3}", norm or ""):
-        return Plan(
-            intent="chat",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response=(
-                "Eu não uso números como seleção de menu. "
-                "Se você quer que eu execute a automação, repita o pedido completo (ex.: 'faça as atividades do PDF no Word'), "
-                "ou diga explicitamente: 'pode executar agora' depois de colocar o PDF em foco."
-            ),
-        )
 
     def _infer_subject_from_context(ctx: list[dict[str, str]] | None) -> str | None:
         """Tenta inferir o assunto/entidade recente (best-effort).
@@ -769,35 +901,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
 
         return None
 
-    # Regra: perguntas de "o que é / você conhece" sobre um tema/cripto.
-    # Preferimos Wikipedia (API) ao invés de Google/Playwright (menos bloqueios/captcha).
-    if re.search(r"\b(conhece|conhecer|o\s+que\s+e|oque\s+e|o\s+que\s+é|me\s+fale\s+sobre|fala\s+sobre|explique)\b", norm):
-        if re.search(r"\bpi\s*network\b", norm):
-            return Plan(
-                intent="knowledge.wikipedia_summary",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"query": "Pi Network", "lang": "pt"})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou buscar um resumo confiável (Wikipedia).",
-            )
-
-    # Regra: estudar/analisar gráfico de cripto (sem navegador).
-    if re.search(r"\b(grafico|gr[aá]fico|chart)\b", norm) and re.search(r"\b(estude|estudar|analise|analisa|analisar|verifique|veja|mostre|estuda)\b", norm):
-        asset: str | None = None
-        if re.search(r"\bpi\s*network\b", norm):
-            asset = "pi network"
-        if asset is None:
-            # Tentativa: inferir assunto recente.
-            asset = _infer_subject_from_context(context_messages)
-        if asset is not None:
-            return Plan(
-                intent="finance.crypto_market_chart",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="finance.crypto_market_chart", args={"asset": asset, "vs": "usd", "days": "30"})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou puxar dados históricos (CoinGecko) e resumir o gráfico.",
-            )
-
     def _guess_name_from_text(text: str) -> str | None:
         # quoted "Meu Projeto"
         q = re.search(r"['\"]([^'\"]{2,60})['\"]", text)
@@ -808,89 +911,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             return (m.group(2) or "").strip()
         return None
 
-    # Regra: toggles de sessão (modo omega)
-    if re.search(r"\b(omega|jarvis)\b", norm) and re.search(
-        r"\b(ativar|ativa|liga|ligar|on|habilitar)\b",
-        norm,
-    ):
-        return Plan(
-            intent="core.omega_on",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — modo omega ativado nesta sessão.",
-        )
-
-    if re.search(r"\b(omega|jarvis)\b", norm) and re.search(
-        r"\b(desativar|desativa|desliga|desligar|off)\b",
-        norm,
-    ):
-        return Plan(
-            intent="core.omega_off",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — modo omega desativado nesta sessão.",
-        )
-
-    # Regra: comandos de voz (TTS) em runtime
-    # Importante: isso NÃO liga STT; apenas habilita/desabilita falar respostas.
-    if re.search(r"\b(silenciar|mute|sem\s+voz|tirar\s+voz|desativar\s+voz|desliga\s+a\s+voz)\b", norm):
-        return Plan(
-            intent="core.voice_off",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — voz desativada (modo silencioso).",
-        )
-
-    if re.search(r"\b(ativar\s+voz|liga\s+a\s+voz|ligar\s+voz|falar\s+resposta|fala\s+as\s+respostas)\b", norm):
-        return Plan(
-            intent="core.voice_on",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — voz ativada para respostas (se disponível).",
-        )
-
-    # Regra: modo autonomia (sessão)
-    if re.search(r"\b(autonomia|autonomo|autopilot|piloto\s+automatico)\b", norm) and re.search(
-        r"\b(ativar|ativa|liga|ligar|on|habilitar)\b",
-        norm,
-    ):
-        return Plan(
-            intent="core.autonomy_on",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — autonomia ativada nesta sessão (tarefas mais longas).",
-        )
-
-    if re.search(r"\b(autonomia|autonomo|autopilot|piloto\s+automatico)\b", norm) and re.search(
-        r"\b(desativar|desativa|desliga|desligar|off)\b",
-        norm,
-    ):
-        return Plan(
-            intent="core.autonomy_off",
-            user_message=msg,
-            tool_calls=[],
-            risk=RiskLevel.LOW,
-            final_response="Ok — autonomia desativada nesta sessão.",
-        )
-
-    # Regra: perfil persistente (preferências explícitas)
-    if re.search(r"\b(meu\s+nome\s+e|meu\s+nome\s+é|pode\s+me\s+chamar\s+de|me\s+chame\s+de)\b", norm):
-        nm = _guess_name_from_text(msg)
-        if nm:
-            return Plan(
-                intent="memory.profile_update",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="memory.profile_update", args={"patch": {"name": nm}})],
-                risk=RiskLevel.LOW,
-                final_response=f"Ok — vou te chamar de {nm}.",
-            )
-
-    if re.search(r"\b(responda\s+em|fale\s+em)\s+(ingles|english)\b", norm):
         return Plan(
             intent="memory.profile_update",
             user_message=msg,
@@ -1190,284 +1210,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
     # NOTA: geração de código (ex.: exemplos completos de Java) é responsabilidade do modo LLM.
     # No modo heurístico, preferimos não chutar código nem “enfiar” templates fixos.
 
-    # Regra: monitoramento contínuo da tela (rewind) — start/stop/status (sob demanda)
-    wants_monitor = bool(
-        re.search(
-            r"\b(monitorar|monitoramento|monitoramento\s+cont[ií]nuo|rewind)\b",
-            norm,
-        )
-        and re.search(r"\b(tela|screen)\b", norm)
-    )
-    if wants_monitor:
-        if re.search(r"\b(status|estado|como\s+esta|como\s+est[aá])\b", norm):
-            return Plan(
-                intent="vision.rewind_status",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="screen.rewind_status", args={})],
-                risk=RiskLevel.LOW,
-                final_response="Aqui está o status do monitoramento de tela (rewind).",
-            )
-
-        if re.search(r"\b(parar|pare|desligar|desliga|stop|encerrar|encerre)\b", norm):
-            return Plan(
-                intent="vision.stop_rewind",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="screen.rewind_stop", args={})],
-                risk=RiskLevel.HIGH,
-                final_response="Ok — vou parar o monitoramento contínuo da tela (requer aprovação).",
-            )
-
-        if re.search(r"\b(come[cç]ar|comece|iniciar|inicie|ligar|liga|start|ativar|ative)\b", norm):
-            return Plan(
-                intent="vision.start_rewind",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="screen.rewind_start", args={})],
-                risk=RiskLevel.HIGH,
-                final_response="Ok — vou iniciar o monitoramento contínuo da tela (requer aprovação).",
-            )
-
-    # Regra: screenshot
-    is_screenshot = bool(
-        re.search(r"\b(screenshot|printscreen|print screen|captura de tela|tire uma captura)\b", norm)
-        or (re.search(r"\bprint\b", norm) and re.search(r"\b(tela|screen)\b", norm))
-    )
-    if is_screenshot:
-        wants_desktop = bool(re.search(r"\b(área de trabalho|area de trabalho|desktop)\b", norm))
-        wants_save = bool(re.search(r"\b(salvar|salva|salve|guardar)\b", norm))
-
-        args: dict[str, Any] = {}
-        if wants_desktop and wants_save:
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            args["path"] = f"desktop:/screen_{ts}.png"
-        return Plan(
-            intent="vision.screenshot",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="screen.screenshot", args=args)],
-            risk=RiskLevel.MEDIUM,
-            final_response=(
-                "Tirei uma captura de tela e salvei na Área de Trabalho." if (wants_desktop and wants_save) else "Tirei uma captura de tela."
-            ),
-        )
-
-    # Regra: clima/tempo (Open-Meteo) — explícito
-    # Exemplos: "clima em São Paulo", "tempo em curitiba", "temperatura em recife"
-    m = re.search(r"\b(clima|tempo|temperatura)\b\s+em\s+(.+)$", msg, flags=re.IGNORECASE)
-    if m:
-        city = (m.group(2) or "").strip().strip("\"'")
-        if city:
-            return Plan(
-                intent="data.weather",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="data.weather_open_meteo", args={"city": city, "lang": "pt"})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou consultar o clima atual (Open-Meteo).",
-            )
-
-    # Regra: preço de cripto (CoinGecko) — explícito
-    # Exemplos: "preço do bitcoin", "valor do btc", "preço do ethereum"
-    if re.search(r"\b(pre[cç]o|valor|cotac[aã]o)\b", norm) and re.search(r"\b(bitcoin|btc|ethereum|eth|solana|sol)\b", norm):
-        m2 = re.search(r"\b(bitcoin|btc|ethereum|eth|solana|sol)\b", norm)
-        asset = (m2.group(1) if m2 else "bitcoin")
-        return Plan(
-            intent="finance.crypto_price",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="finance.crypto_price", args={"asset": asset, "vs": "brl,usd"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou consultar o preço atual (CoinGecko).",
-        )
-
-    # Regra: Wikipedia — explícito
-    # Exemplos: "wikipedia: alan turing", "pesquise na wikipedia sobre redes neurais"
-    m = re.search(r"\b(wikipedia)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="knowledge.wikipedia_summary",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"title": q, "lang": "pt"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar um resumo na Wikipedia.",
-        )
-
-    m = re.search(r"\b(pesquise|pesquisa|procure|buscar|busque)\b.*\b(wikipedia)\b\s+(?:sobre\s+)?(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="knowledge.wikipedia_summary",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="knowledge.wikipedia_summary", args={"title": q, "lang": "pt"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar um resumo na Wikipedia.",
-        )
-
-    # Regra: geocode (onde fica...) — natural
-    # Exemplos: "onde fica MASP?", "onde fica avenida paulista"
-    m = re.match(r"^\s*onde\s+fica\s+(.+?)\s*[\?\!\.]?\s*$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip("\"'")
-        return Plan(
-            intent="geo.geocode",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="geo.geocode", args={"query": q, "lang": "pt"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou localizar no mapa (OpenStreetMap).",
-        )
-
-    # Regra: geocode (coordenadas) — explícito
-    # Exemplos: "coordenadas de São Paulo", "geocode: av paulista, sp"
-    m = re.search(r"\b(coordenadas\s+de|geocode)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="geo.geocode",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="geo.geocode", args={"query": q, "lang": "pt"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou localizar as coordenadas (OpenStreetMap).",
-        )
-
-    # Regra: reverse geocode — explícito
-    # Exemplos: "endereço de -23.55, -46.63", "reverse: -23.55 -46.63"
-    if ("endereco" in norm and " de " in norm) or ("reverse" in norm):
-        nums = re.findall(r"-?\d+(?:[\.,]\d+)?", msg)
-        if len(nums) >= 2:
-            try:
-                lat = float(nums[0].replace(",", "."))
-                lon = float(nums[1].replace(",", "."))
-            except Exception:
-                lat = None
-                lon = None
-            if lat is not None and lon is not None:
-                return Plan(
-                    intent="geo.reverse_geocode",
-                    user_message=msg,
-                    tool_calls=[ToolCall(tool_name="geo.reverse_geocode", args={"lat": lat, "lon": lon, "lang": "pt"})],
-                    risk=RiskLevel.MEDIUM,
-                    final_response="Ok — vou buscar o endereço aproximado (OpenStreetMap).",
-                )
-
-    # Regra: rota — explícito
-    # Exemplos: "rota de Campinas para São Paulo", "como ir de A para B"
-    m = re.search(r"\b(rota|como\s+ir)\b.*\b(de)\b\s+(.+?)\s+\b(para)\b\s+(.+)$", msg, flags=re.IGNORECASE)
-    if m:
-        origin = (m.group(3) or "").strip().strip("\"'")
-        dest = (m.group(5) or "").strip().strip("\"'")
-        if origin and dest:
-            return Plan(
-                intent="geo.route_osrm",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="geo.route_osrm", args={"from": origin, "to": dest, "profile": "driving", "lang": "pt"})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou traçar uma rota (OSRM + OpenStreetMap).",
-            )
-
-    # Regra: conversão de moeda — explícito
-    # Exemplos: "converter 10 usd para brl", "converta 50 EUR para USD"
-    m = re.search(r"\b(converter|converta)\b\s+([\d\.,]+)\s*([A-Za-z]{3})\s+\bpara\b\s+([A-Za-z]{3})\b", msg, flags=re.IGNORECASE)
-    if m:
-        amount_s = (m.group(2) or "").strip().replace(",", ".")
-        cur_from = (m.group(3) or "").strip().upper()
-        cur_to = (m.group(4) or "").strip().upper()
-        try:
-            amount = float(amount_s)
-        except Exception:
-            amount = None
-        if amount is not None:
-            return Plan(
-                intent="finance.fx_convert",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="finance.fx_convert", args={"amount": amount, "from": cur_from, "to": cur_to})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou converter a moeda (Frankfurter/ECB).",
-            )
-
-    # Regra: info de país — explícito
-    # Exemplos: "país: brasil", "country: japan"
-    m = re.search(r"^\s*(pa[ií]s|country)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="data.country_info",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="data.country_info", args={"query": q})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar informações do país (RestCountries).",
-        )
-
-    # Regra: hora (WorldTimeAPI) — explícito
-    # Exemplos: "hora em America/Sao_Paulo", "time: UTC"
-    m = re.search(r"\b(hora\s+em|time)\b\s*[:\-]?\s*([A-Za-z_+\-/]+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        tz = (m.group(2) or "").strip()
-        # Pequeno atalho para BR.
-        if _normalize(tz) in {"brasilia", "brasil", "sao_paulo", "sao-paulo", "sao paulo"}:
-            tz = "America/Sao_Paulo"
-        return Plan(
-            intent="time.world_time",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="time.world_time", args={"tz": tz})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou consultar a hora atual (WorldTimeAPI).",
-        )
-
-    # Regra: notícias (GDELT) — explícito
-    # Exemplos: "notícias sobre IA", "news: economia"
-    if "hacker news" not in norm:
-        m = re.search(r"\b(not[ií]cias\s+sobre|news)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-        if m and (m.group(2) or "").strip():
-            q = (m.group(2) or "").strip().strip("\"'")
-            return Plan(
-                intent="news.gdelt_search",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="news.gdelt_search", args={"query": q, "max_results": 5})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou buscar notícias recentes (GDELT).",
-            )
-
-    # Regra: livros (OpenLibrary) — explícito
-    # Exemplos: "livro: senhor dos aneis", "book: clean code"
-    m = re.search(r"\b(livro|book)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="books.openlibrary_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="books.openlibrary_search", args={"query": q, "max_results": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar livros (OpenLibrary).",
-        )
-
-    # Regra: feriados (Nager.Date) — explícito
-    # Exemplos: "feriados 2026 BR", "feriados: 2025 US"
-    m = re.search(r"\bferiados\b\s*[:\-]?\s*(\d{4})\s+([A-Za-z]{2})\b", msg, flags=re.IGNORECASE)
-    if m:
-        try:
-            year = int(m.group(1) or 0)
-        except Exception:
-            year = 0
-        cc = (m.group(2) or "").strip().upper()
-        if year and cc:
-            return Plan(
-                intent="calendar.holidays",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="calendar.holidays", args={"year": year, "country_code": cc})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou listar feriados públicos (Nager.Date).",
-            )
-
-    # Regra: Crossref — explícito
-    # Exemplos: "crossref: transformers attention", "doi search: alan turing"
-    m = re.search(r"\b(crossref|doi\s+search)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip("\"'")
-        return Plan(
-            intent="papers.crossref_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="papers.crossref_search", args={"query": q, "rows": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar referências/DOIs (Crossref).",
-        )
-
     # Regra: Fear & Greed — explícito
     # Exemplos: "fear and greed", "medo e ganância"
     if re.search(r"\b(fear\s*\&\s*greed|fear\s+and\s+greed|medo\s+e\s+gan[aâ]ncia|indice\s+de\s+medo)\b", norm):
@@ -1529,74 +1271,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             tool_calls=[ToolCall(tool_name="health.covid_stats", args=args)],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou consultar estatísticas de COVID.",
-        )
-
-    # Regra: OpenAlex — explícito
-    # Exemplos: "openalex: transformers", "papers openalex: diffusion models"
-    m = re.search(r"\b(openalex)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="knowledge.openalex_works_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="knowledge.openalex_works_search", args={"query": q, "max_results": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar works/papers no OpenAlex.",
-        )
-
-    # Regra: Wikidata entity — explícito
-    # Exemplos: "wikidata id: Q42", "entity: Q42"
-    m = re.search(r"\b(wikidata\s+id|entity)\b\s*[:\-]?\s*([PQ]\d+)\b", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        ent = (m.group(2) or "").strip().upper()
-        return Plan(
-            intent="knowledge.wikidata_entity",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="knowledge.wikidata_entity", args={"id": ent})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou baixar dados da entidade do Wikidata.",
-        )
-
-    # Regra: Wikidata search — explícito
-    # Exemplos: "wikidata: alan turing"
-    m = re.search(r"\b(wikidata)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="knowledge.wikidata_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="knowledge.wikidata_search", args={"query": q, "lang": "pt", "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar entidades no Wikidata.",
-        )
-
-    # Regra: World Bank indicator — explícito
-    # Exemplos: "worldbank: BR SP.POP.TOTL", "world bank: US NY.GDP.MKTP.CD 2010:2024"
-    m = re.search(r"\b(world\s*bank|worldbank)\b\s*[:\-]?\s*([A-Za-z]{2,3})\s+([A-Za-z0-9_\.]{3,40})(?:\s+(\d{4}:\d{4}|\d{4}))?$", msg, flags=re.IGNORECASE)
-    if m:
-        cc = (m.group(2) or "").strip().upper()
-        ind = (m.group(3) or "").strip().upper()
-        date = (m.group(4) or "").strip()
-        args: dict[str, Any] = {"country_code": cc, "indicator": ind}
-        if date:
-            args["date"] = date
-        return Plan(
-            intent="data.worldbank_indicator",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="data.worldbank_indicator", args=args)],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou consultar o indicador no World Bank.",
-        )
-
-    # Regra: Hacker News (front page) — explícito
-    # Exemplos: "hacker news top", "hn front page"
-    if ("hacker news" in norm) or (re.search(r"\bhn\b", norm) and re.search(r"\b(top|front\s*page|front)\b", norm)):
-        return Plan(
-            intent="news.hackernews_front_page",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="news.hackernews_front_page", args={"limit": 10})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou pegar a front page do Hacker News.",
         )
 
     # Regra: GitHub Status — explícito
@@ -1689,172 +1363,9 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             final_response="Ok — vou consultar o status da OpenAI.",
         )
 
-    # Regra: SpaceX latest launch — explícito
-    if re.search(r"\bspacex\b", norm) and re.search(r"\b(ultimo|latest|last)\b", norm) and re.search(
-        r"\b(lancamento|launch)\b", norm
-    ):
-        return Plan(
-            intent="space.spacex_latest_launch",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="space.spacex_latest_launch", args={})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar o último lançamento da SpaceX.",
-        )
-
-    # Regra: Archive.org advancedsearch — explícito
-    m = re.search(r"\b(archive\s*\.\s*org|archive)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="archive.archiveorg_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="archive.archiveorg_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar no Archive.org.",
-        )
-
-    # Regra: TVMaze — explícito
-    m = re.search(r"\b(tv\s*maze|tvmaze)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="media.tvmaze_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="media.tvmaze_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar séries no TVMaze.",
-        )
-
-    # Regra: TheMealDB — explícito
-    m = re.search(r"\b(meal\s*db|mealdb|themealdb)\b\s*(?:search)?\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="food.meal_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="food.meal_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar receitas no TheMealDB.",
-        )
-
-    # Regra: Universities (Hipolabs) — explícito
-    # Exemplos: "universidades: usp", "universities: mit | country: united states"
-    m = re.search(r"\b(universities|universidade|universidades)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        country = None
-        m_country = re.search(r"\b(country|pa[ií]s)\b\s*:\s*(.+)$", q, flags=re.IGNORECASE)
-        if m_country:
-            country = (m_country.group(2) or "").strip().strip('"\'')
-            q = re.sub(r"\b(country|pa[ií]s)\b\s*:\s*.+$", "", q, flags=re.IGNORECASE).strip().rstrip("|;")
-        args: dict[str, Any] = {"name": q, "limit": 10}
-        if country:
-            args["country"] = country
-        return Plan(
-            intent="edu.universities_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="edu.universities_search", args=args)],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar universidades.",
-        )
-
-    # Regra: Agify/Genderize/Nationalize — explícito
-    m = re.search(r"\bagify\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip('"\'')
-        cc = None
-        m_cc = re.search(r"\bcc\b\s*:\s*([A-Za-z]{2})\b", q)
-        if m_cc:
-            cc = (m_cc.group(1) or "").strip().upper()
-            q = re.sub(r"\bcc\b\s*:\s*[A-Za-z]{2}\b", "", q).strip().rstrip("|;")
-        args: dict[str, Any] = {"name": q}
-        if cc:
-            args["country_code"] = cc
-        return Plan(
-            intent="people.agify_name",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="people.agify_name", args=args)],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou estimar idade provável (Agify).",
-        )
-
-    m = re.search(r"\bgenderize\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip('"\'')
-        cc = None
-        m_cc = re.search(r"\bcc\b\s*:\s*([A-Za-z]{2})\b", q)
-        if m_cc:
-            cc = (m_cc.group(1) or "").strip().upper()
-            q = re.sub(r"\bcc\b\s*:\s*[A-Za-z]{2}\b", "", q).strip().rstrip("|;")
-        args: dict[str, Any] = {"name": q}
-        if cc:
-            args["country_code"] = cc
-        return Plan(
-            intent="people.genderize_name",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="people.genderize_name", args=args)],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou estimar gênero provável (Genderize).",
-        )
-
-    m = re.search(r"\bnationalize\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip('"\'')
-        return Plan(
-            intent="people.nationalize_name",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="people.nationalize_name", args={"name": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou estimar nacionalidade provável (Nationalize).",
-        )
-
-    # Regra: imagem de cachorro — explícito
-    if re.search(r"\b(dog|cachorro)\b", norm) and re.search(r"\b(imagem|foto|image|pic)\b", norm):
-        return Plan(
-            intent="fun.dog_image",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="fun.dog_image", args={})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar uma imagem aleatória de cachorro.",
-        )
-
-    # Regra: Jikan (anime search) — explícito
-    m = re.search(r"\b(anime|jikan)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="anime.jikan_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="anime.jikan_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar animes (Jikan/MyAnimeList).",
-        )
-
-    # Regra: Met Museum — explícito
-    m = re.search(r"\bmet\b\s*(?:object|id)\b\s*[:\-]?\s*(\d+)\b", msg, flags=re.IGNORECASE)
-    if m:
-        oid = int(m.group(1))
-        return Plan(
-            intent="art.met_object",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="art.met_object", args={"object_id": oid})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar o item do Met Museum.",
-        )
-
-    m = re.search(r"\b(met\s*museum|metmuseum|met)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="art.met_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="art.met_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar no acervo do Met Museum.",
-        )
 
     # Regra: Art Institute of Chicago — explícito
-    m = re.search(r"\b(artic|art\s+institute)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    m = re.search(r"\b(art\s*institute\s*of\s*chicago|aic|artic)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
     if m and (m.group(2) or "").strip():
         q = (m.group(2) or "").strip().strip('"\'')
         return Plan(
@@ -1862,60 +1373,60 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             user_message=msg,
             tool_calls=[ToolCall(tool_name="art.artic_search", args={"query": q, "limit": 5})],
             risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar obras no Art Institute of Chicago.",
+            final_response="Ok — vou buscar no acervo do Art Institute of Chicago.",
         )
 
     # Regra: Chess.com — explícito
-    if re.search(r"\bchess\b", norm) and re.search(r"\b(puzzle|quebra\s*cabec|desafio)\b", norm):
+    m = re.search(r"\bchess\b\s*stats\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    if m and (m.group(1) or "").strip():
+        user = (m.group(1) or "").strip().strip('"\'')
+        return Plan(
+            intent="chess.chesscom_stats",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="chess.chesscom_stats", args={"username": user})],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou buscar estatísticas no Chess.com.",
+        )
+
+    if re.search(r"\bchess\b", norm) and re.search(r"\bpuzzle\b", norm):
         return Plan(
             intent="chess.chesscom_daily_puzzle",
             user_message=msg,
             tool_calls=[ToolCall(tool_name="chess.chesscom_daily_puzzle", args={})],
             risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou pegar o puzzle diário do Chess.com.",
-        )
-
-    m = re.search(r"\bchess\b\s+stats\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        u = (m.group(1) or "").strip().strip('"\'')
-        return Plan(
-            intent="chess.chesscom_stats",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="chess.chesscom_stats", args={"username": u})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar os stats do jogador no Chess.com.",
+            final_response="Ok — vou buscar o puzzle diário do Chess.com.",
         )
 
     m = re.search(r"\bchess\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
     if m and (m.group(1) or "").strip():
-        u = (m.group(1) or "").strip().strip('"\'')
+        user = (m.group(1) or "").strip().strip('"\'')
         return Plan(
             intent="chess.chesscom_player",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="chess.chesscom_player", args={"username": u})],
+            tool_calls=[ToolCall(tool_name="chess.chesscom_player", args={"username": user})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou buscar o perfil do jogador no Chess.com.",
         )
 
     # Regra: Open Brewery DB — explícito
-    m = re.search(r"\b(brewery|breweries|cervejaria|cervejarias)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+    m = re.search(r"\b(cervejarias|brewery|breweries)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
     if m and (m.group(2) or "").strip():
         q = (m.group(2) or "").strip().strip('"\'')
         return Plan(
             intent="drink.openbrewerydb_search",
             user_message=msg,
-            tool_calls=[ToolCall(tool_name="drink.openbrewerydb_search", args={"query": q, "limit": 10})],
+            tool_calls=[ToolCall(tool_name="drink.openbrewerydb_search", args={"query": q, "limit": 5})],
             risk=RiskLevel.MEDIUM,
             final_response="Ok — vou buscar cervejarias (Open Brewery DB).",
         )
 
     # Regra: Deck of Cards — explícito
-    m = re.search(r"\b(deck|cards|cartas)\b\s*[:\-]\s*(\d{1,2})\b", msg, flags=re.IGNORECASE)
+    m = re.search(r"\b(cartas|cards)\b\s*[:\-]\s*(\d{1,2})\b", msg, flags=re.IGNORECASE)
     if m:
         try:
-            n = int(m.group(2))
+            n = int(m.group(2) or 1)
         except Exception:
-            n = 5
+            n = 1
         return Plan(
             intent="fun.deck_draw",
             user_message=msg,
@@ -1970,73 +1481,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             final_response="Ok — vou pegar uma imagem aleatória de pato.",
         )
 
-    # Regra: xkcd — explícito
-    m = re.search(r"\bxkcd\b\s*[:\-]\s*(\d{1,6})\b", msg, flags=re.IGNORECASE)
-    if m:
-        return Plan(
-            intent="fun.xkcd_comic",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="fun.xkcd_comic", args={"num": int(m.group(1))})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar essa tirinha do xkcd.",
-        )
-    if re.search(r"\bxkcd\b", norm):
-        if re.search(r"\b(latest|ultimo|u?ltimo|recente)\b", norm) or norm.strip() == "xkcd":
-            return Plan(
-                intent="fun.xkcd_latest",
-                user_message=msg,
-                tool_calls=[ToolCall(tool_name="fun.xkcd_latest", args={})],
-                risk=RiskLevel.MEDIUM,
-                final_response="Ok — vou buscar a última tirinha do xkcd.",
-            )
-
-    # Regra: iTunes Search — explícito
-    m = re.search(r"\bitunes\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip('"\'')
-        return Plan(
-            intent="music.itunes_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="music.itunes_search", args={"query": q, "media": "music", "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar no iTunes.",
-        )
-
-    # Regra: Google Books — explícito
-    m = re.search(r"\b(gbooks|googlebooks|google\s*books)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="books.googlebooks_search",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="books.googlebooks_search", args={"query": q, "limit": 5})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar livros no Google Books.",
-        )
-
-    # Regra: Datamuse (sinônimos) — explícito
-    # Exemplos: "sinônimos de rápido", "datamuse: latency"
-    m = re.search(r"\b(sinonimos|sinônimos)\b\s+de\s+([\w\-]{2,60})\b", msg, flags=re.IGNORECASE)
-    if m and (m.group(2) or "").strip():
-        q = (m.group(2) or "").strip().strip('"\'')
-        return Plan(
-            intent="language.datamuse_related_words",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="language.datamuse_related_words", args={"query": q, "relation": "rel_syn", "max_results": 10})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar sinônimos/relacionados (Datamuse).",
-        )
-
-    m = re.search(r"\bdatamuse\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
-    if m and (m.group(1) or "").strip():
-        q = (m.group(1) or "").strip().strip('"\'')
-        return Plan(
-            intent="language.datamuse_related_words",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="language.datamuse_related_words", args={"query": q, "relation": "ml", "max_results": 10})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou buscar palavras relacionadas (Datamuse).",
-        )
 
     # Regra: Scryfall (Magic) — explícito
     if re.search(r"\b(scryfall|mtg)\b", norm) and re.search(r"\b(random|aleatoria|aleatória)\b", norm):
@@ -3289,163 +2733,6 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
             final_response="Ok, vou abrir a página e extrair o texto (read-only).",
         )
 
-    # Regra: status/config/settings
-    if norm in {"settings", "config", "configuracao", "configuracoes", "status", "seguranca"}:
-        return Plan(
-            intent="core.show_settings",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.show_settings", args={})],
-            risk=RiskLevel.LOW,
-            final_response="Aqui estão as configurações efetivas.",
-        )
-
-    # Regra: diagnóstico (doctor)
-    if norm in {"doctor", "diagnostico", "diagnostico do ambiente", "diagnostico ambiente", "diagnostico do sistema"} or bool(
-        re.search(r"\b(doctor|diagnostico|diagnostico\s+do\s+ambiente|diagnostico\s+ambiente)\b", norm)
-    ):
-        return Plan(
-            intent="core.doctor",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.doctor", args={})],
-            risk=RiskLevel.LOW,
-            final_response="Ok — vou rodar o diagnóstico do ambiente.",
-        )
-
-    # Regra: listar aprovações lembradas (HITL)
-    if bool(
-        re.search(
-            r"\b(listar|lista|ver|mostrar|exibir)\b.*\b(permissoes|permissoes\s+lembradas|permissao|aprovacoes|aprovacoes\s+lembradas|hitl)\b",
-            norm,
-        )
-    ):
-        return Plan(
-            intent="core.approvals_list",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.approvals_list", args={})],
-            risk=RiskLevel.LOW,
-            final_response="Ok — aqui está a lista de permissões lembradas.",
-        )
-
-    # Regra: resetar/limpar aprovações lembradas (HITL)
-    if bool(
-        re.search(
-            r"\b(resetar|reset|limpar|apagar|zerar)\b.*\b(permissoes|permissoes\s+lembradas|aprovacoes|aprovacoes\s+lembradas|hitl)\b",
-            norm,
-        )
-    ):
-        return Plan(
-            intent="core.approvals_reset",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.approvals_reset", args={})],
-            risk=RiskLevel.HIGH,
-            final_response="Ok — vou resetar as permissões lembradas (requer aprovação).",
-        )
-
-    # Regra: revogar aprovações específicas (HITL)
-    if bool(re.search(r"\b(revogar|revoga|remover|remove)\b.*\b(permissoes|permissoes\s+lembradas|aprovacoes|aprovacoes\s+lembradas|hitl)\b", norm)):
-        # Aceita formatos:
-        # - revogar permissões contendo vscode.
-        # - revogar permissão "vscode.install_extension:id=foo.bar"
-        contains = ""
-        m_quote = re.search(r"['\"]([^'\"]{2,180})['\"]", msg)
-        if m_quote:
-            contains = (m_quote.group(1) or "").strip()
-        else:
-            m = re.search(r"\bcontendo\b\s+(.+)$", norm)
-            if m:
-                contains = (m.group(1) or "").strip()
-
-        args: dict[str, Any] = {}
-        if contains:
-            args["contains"] = contains
-
-        if not args:
-            return Plan(
-                intent="chat",
-                user_message=msg,
-                tool_calls=[],
-                risk=RiskLevel.LOW,
-                final_response=(
-                    "Certo — o que você quer revogar exatamente? "
-                    "Exemplos: 'revogar permissões contendo vscode.' ou 'revogar permissão \"vscode.install_extension\"'."
-                ),
-            )
-
-        return Plan(
-            intent="core.approvals_revoke",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.approvals_revoke", args=args)],
-            risk=RiskLevel.HIGH,
-            final_response="Ok — vou revogar permissões lembradas (requer aprovação).",
-        )
-
-    # Regra: policy (mostrar)
-    if bool(re.search(r"\b(policy|politica)\b", norm)) and bool(
-        re.search(r"\b(mostrar|ver|exibir|listar|status|config|configuracao)\b", norm)
-    ):
-        return Plan(
-            intent="core.policy_show",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.policy_show", args={})],
-            risk=RiskLevel.LOW,
-            final_response="Ok — vou mostrar a policy efetiva.",
-        )
-
-    # Regra: snapshots (listar)
-    if bool(re.search(r"\b(listar|lista|ver|mostrar|exibir)\b.*\b(snapshot|snapshots)\b", norm)):
-        return Plan(
-            intent="core.snapshot_list",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.snapshot_list", args={})],
-            risk=RiskLevel.LOW,
-            final_response="Ok — vou listar snapshots recentes.",
-        )
-
-    # Regra: snapshots (criar)
-    if bool(re.search(r"\b(criar|gerar|fazer)\b.*\b(snapshot|backup)\b", norm)):
-        return Plan(
-            intent="core.snapshot_create",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.snapshot_create", args={"label": "manual"})],
-            risk=RiskLevel.MEDIUM,
-            final_response="Ok — vou criar um snapshot (zip) do workspace.",
-        )
-
-    # Regra: snapshots (restaurar)
-    if bool(re.search(r"\b(restaurar|rollback|voltar)\b.*\b(snapshot)\b", norm)):
-        m = re.search(r"\b(snapshot)\b\s*[:=]?\s*([a-zA-Z0-9._-]{6,120})", msg)
-        snap_id = (m.group(2) if m else "").strip()
-        if not snap_id:
-            m2 = re.search(r"\b([0-9]{8}_[0-9]{6}_[a-z0-9-]{6,})\b", norm)
-            snap_id = (m2.group(1) if m2 else "").strip()
-
-        if not snap_id:
-            return Plan(
-                intent="chat",
-                user_message=msg,
-                tool_calls=[],
-                risk=RiskLevel.LOW,
-                final_response="Qual snapshot_id você quer restaurar? Ex: 'restaurar snapshot 20250101_120000_abc123'.",
-            )
-
-        return Plan(
-            intent="core.snapshot_restore",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.snapshot_restore", args={"snapshot_id": snap_id})],
-            risk=RiskLevel.CRITICAL,
-            final_response="Ok — vou restaurar o snapshot (isso é destrutivo e requer aprovação).",
-        )
-
-    # Regra: memory hygiene (compactar JSONL)
-    if bool(re.search(r"\b(compactar|compacta|limpar|reduzir)\b.*\b(memoria|memory)\b", norm)):
-        return Plan(
-            intent="core.memory_compact",
-            user_message=msg,
-            tool_calls=[ToolCall(tool_name="core.memory_compact", args={"keep_last": 5000, "archive": True})],
-            risk=RiskLevel.HIGH,
-            final_response="Ok — vou compactar a memória (mantendo os eventos mais recentes).",
-        )
-
     # Regra: ajuda/tools
     if norm in {"ajuda", "help", "comandos", "commands"}:
         return Plan(
@@ -3623,84 +2910,7 @@ def _route_with_llm_messages(
     def _build_schema_hints(r: ToolRegistry, *, only_names: set[str] | None = None) -> str:
         # Hints curtos para tools comuns/complexas.
         # Só incluímos as que existem no runtime para evitar planos inválidos.
-        hints: dict[str, str] = {
-            "core.show_settings": "- core.show_settings -> {}",
-            "core.list_tools": "- core.list_tools -> {}",
-            "core.help": "- core.help -> {}",
-            "core.doctor": "- core.doctor -> {} (LOW; diagnostico offline)",
-            "core.approvals_list": "- core.approvals_list -> {} (LOW; lista aprovacoes lembradas)",
-            "core.approvals_revoke": "- core.approvals_revoke -> {keys?, contains?} (HIGH; revoga por chave ou substring)",
-            "core.approvals_reset": "- core.approvals_reset -> {} (HIGH; limpa todas as aprovacoes lembradas)",
-            "core.policy_show": "- core.policy_show -> {} (LOW; mostra policy)",
-            "core.policy_write": "- core.policy_write -> {policy} (HIGH; escreve policy JSON)",
-            "core.snapshot_create": "- core.snapshot_create -> {label?} (MEDIUM; cria snapshot zip)",
-            "core.snapshot_list": "- core.snapshot_list -> {limit?} (LOW; lista snapshots)",
-            "core.snapshot_restore": "- core.snapshot_restore -> {snapshot_id} (CRITICAL; destrutivo)",
-            "core.memory_compact": "- core.memory_compact -> {keep_last?, archive?, base_dir?} (HIGH; compacta events.jsonl)",
-            "echo": "- echo -> {text}",
-            "write_file": "- write_file -> {path, content}",
-            "os.open_url": "- os.open_url -> {url} (http/https)",
-            "os.open_explorer": "- os.open_explorer -> {path?} (path relativo; default '.')",
-            "os.open_app": "- os.open_app -> {app} (allowlist via OMNI_OPEN_APPS_FILE/OMNI_OPEN_APPS_JSON)",
-            "os.close_app": "- os.close_app -> {app? , title_contains? , timeout_s?}",
-            "os.list_processes": "- os.list_processes -> {query?, max_results?} (Windows; read-only)",
-            "os.list_installed_apps": "- os.list_installed_apps -> {query?, max_results?} (Windows; read-only)",
-            "os.mkdir": "- os.mkdir -> {path? , known_folder? , name?} (HIGH; Windows; path absoluto ou known_folder=desktop/downloads/documents)",
-            "fs.list_dir": "- fs.list_dir -> {path}",
-            "fs.read_text": "- fs.read_text -> {path, max_chars?}",
-            "fs.mkdir": "- fs.mkdir -> {path}",
-            "fs.copy": "- fs.copy -> {src, dst, overwrite?}",
-            "fs.move": "- fs.move -> {src, dst, overwrite?}",
-            "fs.delete": "- fs.delete -> {path} (CRITICAL)",
-            "screen.screenshot": "- screen.screenshot -> {}",
-            "screen.ocr": "- screen.ocr -> {path?}",
-            "screen.find_text": "- screen.find_text -> {query, path?, window_title?, max_results?, min_conf?}",
-            "screen.click_text": "- screen.click_text -> {query, path?, window_title?, min_conf?} (CRITICAL)",
-            "gui.get_mouse": "- gui.get_mouse -> {}",
-            "gui.move_mouse": "- gui.move_mouse -> {x, y}",
-            "gui.click": "- gui.click -> {x, y} (CRITICAL)",
-            "gui.click_box_center": "- gui.click_box_center -> {x, y, w, h} (CRITICAL)",
-            "gui.type_text": "- gui.type_text -> {text} (CRITICAL)",
-            "win.focus_window": "- win.focus_window -> {title_contains, timeout_s?, visible_only?} (HIGH; Windows)",
-            "win.list_windows": "- win.list_windows -> {title_contains?, visible_only?, include_empty_titles?, max_results?} (LOW; Windows)",
-            "win.foreground_window": "- win.foreground_window -> {} (LOW; Windows)",
-            "vscode.open": "- vscode.open -> {path?} (MEDIUM; usa VS Code CLI 'code'; path relativo; default '.')",
-            "vscode.open_file": "- vscode.open_file -> {path, line?, column?} (MEDIUM; workspace-relative)",
-            "vscode.list_extensions": "- vscode.list_extensions -> {show_versions?} (LOW)",
-            "vscode.install_extension": "- vscode.install_extension -> {extension_id, force?} (HIGH)",
-            "vscode.uninstall_extension": "- vscode.uninstall_extension -> {extension_id} (HIGH)",
-            "vscode.settings_read": "- vscode.settings_read -> {} (LOW; lê .vscode/settings.json)",
-            "vscode.settings_get": "- vscode.settings_get -> {key} (LOW)",
-            "vscode.settings_update": "- vscode.settings_update -> {patch} (HIGH; merge patch em .vscode/settings.json)",
-            "vscode.extensions_read": "- vscode.extensions_read -> {} (LOW; lê .vscode/extensions.json)",
-            "vscode.extensions_update": "- vscode.extensions_update -> {add?, remove?} (HIGH; atualiza recommendations)",
-            "vscode.tasks_read": "- vscode.tasks_read -> {} (LOW; lê .vscode/tasks.json)",
-            "vscode.tasks_update": "- vscode.tasks_update -> {patch} (HIGH; merge patch em .vscode/tasks.json)",
-            "vscode.launch_read": "- vscode.launch_read -> {} (LOW; lê .vscode/launch.json)",
-            "vscode.launch_update": "- vscode.launch_update -> {patch} (HIGH; merge patch em .vscode/launch.json)",
-            "web.get_page_text": "- web.get_page_text -> {url, max_chars?}",
-            "web.search": "- web.search -> {query, max_results?}",
-            "web.research": "- web.research -> {query, max_results?, max_pages?, max_chars_per_page?, save_to_memory?, summarize?}",
-            "web.screenshot": "- web.screenshot -> {url, path?}",
-            "web.get_links": "- web.get_links -> {url, max_links?}",
-            "dev.exec": "- dev.exec -> {command, timeout_s?}",
-            "dev.run_python": "- dev.run_python -> {code|module|script, timeout_s?}",
-            "dev.create_tool": "- dev.create_tool -> {name, code, overwrite?} (CRITICAL; requer opt-in)",
-            "dev.autofix_python_file": "- dev.autofix_python_file -> {path, max_iters?, timeout_s?}",
-            "dev.autofix_cmd": "- dev.autofix_cmd -> {command, max_iters?, timeout_s?} (apenas pytest)",
-            "discord.send_message": "- discord.send_message -> {to, message, settle_ms?} (CRITICAL)",
-            "jgrasp.create_java_program": "- jgrasp.create_java_program -> {path?, class_name?, message?, code?, open_in_jgrasp?, settle_ms?} (HIGH)",
-            "jgrasp.write_code": "- jgrasp.write_code -> {code, settle_ms?, select_all?} (HIGH)",
-            "memory.search": "- memory.search -> {query, limit?}",
-            "memory.remember": "- memory.remember -> {text, topic?, tags?}",
-            "memory.search_vector": "- memory.search_vector -> {query, limit?} (se disponível)",
-            "memory.index_recent": "- memory.index_recent -> {limit?} (se disponível)",
-            "memory.index_paths": "- memory.index_paths -> {paths, max_file_mb?, max_files?} (se disponível)",
-            "memory.index_workspace": "- memory.index_workspace -> {max_file_mb?, max_files?} (se disponível)",
-            "memory.profile_get": "- memory.profile_get -> {}",
-            "memory.profile_update": "- memory.profile_update -> {patch}",
-            "memory.profile_reset": "- memory.profile_reset -> {}",
-        }
+        hints: dict[str, str] = load_schema_hints()
 
         present: list[str] = []
         for name in sorted(hints.keys()):
@@ -3717,7 +2927,9 @@ def _route_with_llm_messages(
         """Seleciona um subconjunto (Top-K) de tools para o prompt.
 
         Motivo: injetar todas as tools todo turno aumenta tokens/latência e piora a qualidade.
-        Estratégia: scoring lexical (sem dependências extras) + conjunto base.
+        Estratégia:
+        - (Opcional) shortlist semântico (ChromaDB) quando disponível.
+        - Fallback para scoring lexical (sem dependências extras) + conjunto base.
         """
 
         if (os.getenv("OMNI_ROUTER_TOOL_SHORTLIST", "true").strip().lower() == "false"):
@@ -3752,6 +2964,27 @@ def _route_with_llm_messages(
             base += ["discord.send_message", "status.discord"]
         if "vscode" in q_norm or "vs" in q_tokens or "code" in q_tokens:
             base += ["vscode.tasks_read", "vscode.tasks_update", "vscode.settings_read", "vscode.settings_update"]
+
+        # (Opt-in) shortlist semântico via embeddings locais.
+        # Controlado por OMNI_ROUTER_TOOL_RAG=true.
+        if _TOOL_SHORTLISTER is not None and (os.getenv("OMNI_ROUTER_TOOL_RAG", "false").strip().lower() == "true"):
+            try:
+                k_sem = min(_env_int("OMNI_ROUTER_TOOL_RAG_K", 12), 40)
+                sem_hits = _TOOL_SHORTLISTER.shortlist(registry=r, query=user_text, k=k_sem)
+                sem_names = [h.name for h in sem_hits if h.name]
+                if sem_names:
+                    max_total = _env_int("OMNI_ROUTER_TOOL_SHORTLIST_MAX", 80)
+                    merged: list[str] = []
+                    for n in base + sem_names:
+                        nn = (n or "").strip()
+                        if not nn or nn in merged:
+                            continue
+                        merged.append(nn)
+                        if len(merged) >= max_total:
+                            break
+                    return merged
+            except Exception:
+                pass
 
         scored: list[tuple[int, str]] = []
         for spec in r.list():
@@ -3804,7 +3037,7 @@ def _route_with_llm_messages(
 
         return selected[:max_total]
 
-    static_tools_block = (
+    static_tools_block = load_static_tools_block() or (
         "- core.show_settings -> {}\n"
         "- core.list_tools -> {}\n"
         "- core.doctor -> {} (LOW; diagnostico offline)\n"

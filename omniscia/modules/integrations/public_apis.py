@@ -136,6 +136,7 @@ Mais APIs variadas (sem chave) — lote 5:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -355,6 +356,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Busca resumo na Wikipedia (REST). Args: title|query, lang? (pt/en)",
             risk="MEDIUM",
             fn=_wikipedia_summary,
+            async_fn=_wikipedia_summary_async,
         )
     )
 
@@ -365,6 +367,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
                 "Clima atual por cidade (Open-Meteo). Args: city, country_code? (ex: BR), lang? (pt)") ,
             risk="MEDIUM",
             fn=_weather_open_meteo,
+            async_fn=_weather_open_meteo_async,
         )
     )
 
@@ -376,6 +379,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             ),
             risk="MEDIUM",
             fn=_crypto_price,
+            async_fn=_crypto_price_async,
         )
     )
 
@@ -396,6 +400,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Busca papers no arXiv (ATOM). Args: query, max_results? (default 5)",
             risk="MEDIUM",
             fn=_arxiv_search,
+            async_fn=_arxiv_search_async,
         )
     )
 
@@ -408,6 +413,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             ),
             risk="MEDIUM",
             fn=_web_search,
+            async_fn=_web_search_async,
         )
     )
 
@@ -417,6 +423,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Geocoding (texto -> lat/lon) via OpenStreetMap Nominatim. Args: query, lang? (pt/en), country_codes? (ex: br)",
             risk="MEDIUM",
             fn=_geo_geocode,
+            async_fn=_geo_geocode_async,
         )
     )
 
@@ -426,6 +433,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Reverse geocoding (lat/lon -> endereço) via OpenStreetMap Nominatim. Args: lat, lon, lang? (pt/en)",
             risk="MEDIUM",
             fn=_geo_reverse_geocode,
+            async_fn=_geo_reverse_geocode_async,
         )
     )
 
@@ -446,6 +454,7 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
             description="Converte moedas via Frankfurter (ECB). Args: amount, from, to",
             risk="MEDIUM",
             fn=_fx_convert,
+            async_fn=_fx_convert_async,
         )
     )
 
@@ -1353,6 +1362,39 @@ def _http_json(
         return None, str(exc)
 
 
+async def _http_json_async(
+    *,
+    method: str,
+    url: str,
+    params: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout_s: float = 12.0,
+) -> tuple[Any | None, str | None]:
+    """Versão async de `_http_json` (mesmas regras de allowlist/HTTPS)."""
+
+    try:
+        u = httpx.URL(url)
+        host = (u.host or "").lower()
+        if u.scheme != "https":
+            return None, "apenas https é permitido"
+        if host not in _ALLOWED_HOSTS:
+            return None, f"host não permitido: {host}"
+
+        merged_headers = {**_default_headers(), **(headers or {})}
+
+        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+            resp = await client.request(method.upper(), url, params=params, json=json_body, headers=merged_headers)
+        if resp.status_code >= 400:
+            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        try:
+            return resp.json(), None
+        except Exception:
+            return None, "resposta não é JSON"
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+
+
 def _http_form(
     *,
     url: str,
@@ -1413,6 +1455,43 @@ def _http_text(
         return None, str(exc)
 
 
+async def _http_text_async(
+    *,
+    url: str,
+    params: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
+    timeout_s: float = 12.0,
+) -> tuple[str | None, str | None]:
+    """Versão async de `_http_text` (mesmas regras de allowlist/HTTPS)."""
+
+    try:
+        u = httpx.URL(url)
+        host = (u.host or "").lower()
+        if u.scheme != "https":
+            return None, "apenas https é permitido"
+        if host not in _ALLOWED_HOSTS:
+            return None, f"host não permitido: {host}"
+
+        merged_headers = {**_default_headers(), **(headers or {})}
+        merged_headers.setdefault("Accept", "text/html, text/plain; q=0.9, */*; q=0.1")
+
+        async with httpx.AsyncClient(timeout=timeout_s, follow_redirects=True) as client:
+            resp = await client.get(url, params=params, headers=merged_headers)
+        if resp.status_code >= 400:
+            return None, f"HTTP {resp.status_code}: {resp.text[:300]}"
+        return resp.text, None
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+
+
+def _in_event_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except Exception:
+        return False
+
+
 def _web_search(args: dict[str, Any]) -> ToolResult:
     """Busca web com fallback.
 
@@ -1425,6 +1504,50 @@ def _web_search(args: dict[str, Any]) -> ToolResult:
     if api_key:
         return _tavily_search(args)
     return _duckduckgo_search(args)
+
+
+async def _web_search_async(args: dict[str, Any]) -> ToolResult:
+    """Versão async de `web.search`.
+
+    - Tavily: HTTP JSON (async)
+    - DuckDuckGo fallback: reusa parser sync via thread (HTML + regex)
+    """
+
+    api_key = (os.getenv("OMNI_TAVILY_API_KEY") or "").strip()
+    if api_key:
+        query = str(args.get("query", "") or args.get("q", "") or "").strip()
+        if not query:
+            return ToolResult(status="error", error="informe query")
+
+        try:
+            max_results = int(args.get("max_results", 5) or 5)
+        except Exception:
+            max_results = 5
+        if max_results < 1:
+            max_results = 1
+        if max_results > 10:
+            max_results = 10
+
+        depth = str(args.get("depth", "basic") or "basic").strip().lower()
+        if depth not in {"basic", "advanced"}:
+            depth = "basic"
+
+        url = "https://api.tavily.com/search"
+        body = {
+            "api_key": api_key,
+            "query": query,
+            "search_depth": depth,
+            "max_results": max_results,
+            "include_images": False,
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+        data, err = await _http_json_async(method="POST", url=url, json_body=body, timeout_s=12.0)
+        if err:
+            return ToolResult(status="error", error=err)
+        return ToolResult(status="ok", output=json.dumps(data, ensure_ascii=False))
+
+    return await asyncio.to_thread(_duckduckgo_search, args)
 
 
 def _duckduckgo_search(args: dict[str, Any]) -> ToolResult:
@@ -1529,6 +1652,56 @@ def _wikipedia_summary(args: dict[str, Any]) -> ToolResult:
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
+async def _wikipedia_summary_async(args: dict[str, Any]) -> ToolResult:
+    title = str(args.get("title") or args.get("query") or "").strip()
+    if not title:
+        return ToolResult(status="error", error="informe title (ou query)")
+
+    lang = str(args.get("lang", "pt") or "pt").strip().lower()
+    if lang not in {"pt", "en"}:
+        lang = "pt"
+
+    safe_title = quote(title.replace(" ", "_"), safe="")
+    url = f"https://{lang}.wikipedia.org/api/rest_v1/page/summary/{safe_title}"
+
+    data, err = await _http_json_async(method="GET", url=url)
+    if err:
+        if str(err).startswith("HTTP 404"):
+            out = {
+                "title": title,
+                "lang": lang,
+                "url": "",
+                "summary": "Página não encontrada na Wikipedia.",
+            }
+            return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+        return ToolResult(status="error", error=err)
+
+    assert data is not None
+    extract = str(data.get("extract", "") or "").strip()
+    page_url = ""
+    try:
+        page_url = str((((data.get("content_urls") or {}).get("desktop") or {}).get("page") or "")).strip()
+    except Exception:
+        page_url = ""
+
+    if not extract:
+        out = {
+            "title": str(data.get("title", "") or title),
+            "lang": lang,
+            "url": page_url,
+            "summary": "Sem resumo disponível (página não encontrada ou vazia).",
+        }
+        return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+    out = {
+        "title": str(data.get("title", "") or title),
+        "lang": lang,
+        "url": page_url,
+        "summary": extract,
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
 def _weather_open_meteo(args: dict[str, Any]) -> ToolResult:
     city = str(args.get("city", "") or "").strip()
     if not city:
@@ -1568,6 +1741,61 @@ def _weather_open_meteo(args: dict[str, Any]) -> ToolResult:
         "timezone": "auto",
     }
     wx, err2 = _http_json(method="GET", url="https://api.open-meteo.com/v1/forecast", params=forecast_params)
+    if err2:
+        return ToolResult(status="error", error=err2)
+
+    current = (wx or {}).get("current") if isinstance(wx, dict) else None
+    out = {
+        "place": {
+            "name": r0.get("name"),
+            "admin1": r0.get("admin1"),
+            "country": r0.get("country"),
+            "latitude": float(lat),
+            "longitude": float(lon),
+        },
+        "current": current or {},
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+async def _weather_open_meteo_async(args: dict[str, Any]) -> ToolResult:
+    city = str(args.get("city", "") or "").strip()
+    if not city:
+        return ToolResult(status="error", error="informe city")
+
+    lang = str(args.get("lang", "pt") or "pt").strip().lower() or "pt"
+    country_code = str(args.get("country_code", "") or "").strip().upper()
+
+    params: dict[str, Any] = {
+        "name": city,
+        "count": 1,
+        "language": lang,
+        "format": "json",
+    }
+    if country_code and re.fullmatch(r"[A-Z]{2}", country_code):
+        params["country_code"] = country_code
+
+    geo, err = await _http_json_async(method="GET", url="https://geocoding-api.open-meteo.com/v1/search", params=params)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    results = (geo or {}).get("results") if isinstance(geo, dict) else None
+    if not results:
+        return ToolResult(status="error", error="cidade não encontrada")
+
+    r0 = (results or [])[0] or {}
+    lat = r0.get("latitude")
+    lon = r0.get("longitude")
+    if lat is None or lon is None:
+        return ToolResult(status="error", error="geocoding incompleto")
+
+    forecast_params = {
+        "latitude": float(lat),
+        "longitude": float(lon),
+        "current": "temperature_2m,relative_humidity_2m,wind_speed_10m",
+        "timezone": "auto",
+    }
+    wx, err2 = await _http_json_async(method="GET", url="https://api.open-meteo.com/v1/forecast", params=forecast_params)
     if err2:
         return ToolResult(status="error", error=err2)
 
@@ -1679,6 +1907,36 @@ def _crypto_price(args: dict[str, Any]) -> ToolResult:
 
     params = {"ids": coin_id, "vs_currencies": vs}
     data, err = _http_json(method="GET", url="https://api.coingecko.com/api/v3/simple/price", params=params)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    price = (data or {}).get(coin_id)
+    if not isinstance(price, dict) or not price:
+        return ToolResult(status="error", error="asset não encontrado")
+
+    out = {"asset": asset_raw, "coin_id": coin_id, "vs": vs.split(","), "price": price}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+async def _crypto_price_async(args: dict[str, Any]) -> ToolResult:
+    asset_raw = str(args.get("asset", "") or "").strip().lower()
+    if not asset_raw:
+        return ToolResult(status="error", error="informe asset (ex: bitcoin|btc)")
+
+    asset = _ASSET_ALIASES.get(asset_raw, asset_raw)
+    vs_raw = str(args.get("vs", "brl,usd") or "brl,usd")
+    vs = ",".join([v.strip().lower() for v in vs_raw.split(",") if v.strip()])
+    if not vs:
+        vs = "brl,usd"
+
+    # Resolver id envolve mais lógica (ranking) e reaproveita o sync.
+    coin_id, id_err = await asyncio.to_thread(_coingecko_find_coin_id, asset)
+    if id_err:
+        return ToolResult(status="error", error=id_err)
+    assert coin_id is not None
+
+    params = {"ids": coin_id, "vs_currencies": vs}
+    data, err = await _http_json_async(method="GET", url="https://api.coingecko.com/api/v3/simple/price", params=params)
     if err:
         return ToolResult(status="error", error=err)
 
@@ -1954,6 +2212,72 @@ def _arxiv_search(args: dict[str, Any]) -> ToolResult:
         return ToolResult(status="error", error=str(exc))
 
 
+async def _arxiv_search_async(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    try:
+        max_results = int(args.get("max_results", 5) or 5)
+    except Exception:
+        max_results = 5
+    if max_results < 1:
+        max_results = 1
+    if max_results > 10:
+        max_results = 10
+
+    q = quote(query)
+    url = f"https://export.arxiv.org/api/query?search_query=all:{q}&start=0&max_results={max_results}"
+
+    try:
+        u = httpx.URL(url)
+        host = (u.host or "").lower()
+        if u.scheme != "https" or host not in _ALLOWED_HOSTS:
+            return ToolResult(status="error", error="host não permitido")
+
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as client:
+            resp = await client.get(url)
+        if resp.status_code >= 400:
+            return ToolResult(status="error", error=f"HTTP {resp.status_code}: {resp.text[:200]}")
+
+        import xml.etree.ElementTree as ET
+
+        root = ET.fromstring(resp.text)
+        ns = {"a": "http://www.w3.org/2005/Atom"}
+        entries = root.findall("a:entry", ns)
+        out_entries: list[dict[str, Any]] = []
+        for e in entries[:max_results]:
+            title = (e.findtext("a:title", default="", namespaces=ns) or "").strip()
+            summary = (e.findtext("a:summary", default="", namespaces=ns) or "").strip()
+            published = (e.findtext("a:published", default="", namespaces=ns) or "").strip()
+            link = ""
+            for l in e.findall("a:link", ns):
+                href = l.attrib.get("href") or ""
+                rel = (l.attrib.get("rel") or "").lower()
+                if rel == "alternate" and href:
+                    link = href
+                    break
+            authors = [
+                (a.findtext("a:name", default="", namespaces=ns) or "").strip()
+                for a in e.findall("a:author", ns)
+            ]
+            authors = [a for a in authors if a]
+            out_entries.append(
+                {
+                    "title": title,
+                    "published": published,
+                    "url": link,
+                    "authors": authors,
+                    "summary": summary[:1200] + ("..." if len(summary) > 1200 else ""),
+                }
+            )
+
+        out = {"query": query, "results": out_entries}
+        return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+    except Exception:
+        return await asyncio.to_thread(_arxiv_search, args)
+
+
 def _tavily_search(args: dict[str, Any]) -> ToolResult:
     api_key = (os.getenv("OMNI_TAVILY_API_KEY") or "").strip()
     if not api_key:
@@ -2068,6 +2392,64 @@ def _geo_geocode(args: dict[str, Any]) -> ToolResult:
     return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
+async def _geo_geocode_async(args: dict[str, Any]) -> ToolResult:
+    query = str(args.get("query", "") or args.get("q", "") or "").strip()
+    if not query:
+        return ToolResult(status="error", error="informe query")
+
+    lang = str(args.get("lang", "pt") or "pt").strip().lower()
+    if lang not in {"pt", "en"}:
+        lang = "pt"
+
+    country_codes = str(args.get("country_codes", "") or "").strip().lower()
+    if country_codes and not re.fullmatch(r"[a-z]{2}(?:,[a-z]{2})*", country_codes):
+        country_codes = ""
+
+    params: dict[str, Any] = {
+        "q": query,
+        "format": "json",
+        "limit": 3,
+        "addressdetails": 1,
+        "accept-language": lang,
+    }
+    if country_codes:
+        params["countrycodes"] = country_codes
+
+    data, err = await _http_json_async(method="GET", url="https://nominatim.openstreetmap.org/search", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    if not isinstance(data, list) or not data:
+        return ToolResult(status="error", error="nenhum resultado")
+
+    slim: list[dict[str, Any]] = []
+    for r in data[:3]:
+        if not isinstance(r, dict):
+            continue
+        try:
+            lat_raw = r.get("lat")
+            lon_raw = r.get("lon")
+            if lat_raw is None or lon_raw is None:
+                continue
+            lat = float(str(lat_raw).replace(",", "."))
+            lon = float(str(lon_raw).replace(",", "."))
+        except Exception:
+            continue
+        slim.append(
+            {
+                "display_name": str(r.get("display_name", "") or "")[:220],
+                "lat": lat,
+                "lon": lon,
+                "type": r.get("type"),
+                "class": r.get("class"),
+                "address": r.get("address") or {},
+            }
+        )
+
+    out = {"query": query, "results": slim}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
 def _geo_reverse_geocode(args: dict[str, Any]) -> ToolResult:
     try:
         lat = float(str(args.get("lat", "")).replace(",", "."))
@@ -2087,6 +2469,37 @@ def _geo_reverse_geocode(args: dict[str, Any]) -> ToolResult:
         "accept-language": lang,
     }
     data, err = _http_json(method="GET", url="https://nominatim.openstreetmap.org/reverse", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    out = {
+        "lat": lat,
+        "lon": lon,
+        "display_name": str((data or {}).get("display_name", "") or "")[:240],
+        "address": (data or {}).get("address") or {},
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+async def _geo_reverse_geocode_async(args: dict[str, Any]) -> ToolResult:
+    try:
+        lat = float(str(args.get("lat", "")).replace(",", "."))
+        lon = float(str(args.get("lon", "")).replace(",", "."))
+    except Exception:
+        return ToolResult(status="error", error="informe lat e lon")
+
+    lang = str(args.get("lang", "pt") or "pt").strip().lower()
+    if lang not in {"pt", "en"}:
+        lang = "pt"
+
+    params = {
+        "lat": lat,
+        "lon": lon,
+        "format": "json",
+        "addressdetails": 1,
+        "accept-language": lang,
+    }
+    data, err = await _http_json_async(method="GET", url="https://nominatim.openstreetmap.org/reverse", params=params, timeout_s=12.0)
     if err:
         return ToolResult(status="error", error=err)
 
@@ -2199,6 +2612,34 @@ def _fx_convert(args: dict[str, Any]) -> ToolResult:
 
     params = {"amount": amount, "from": cur_from, "to": cur_to}
     data, err = _http_json(method="GET", url="https://api.frankfurter.app/latest", params=params, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+
+    rates = (data or {}).get("rates") if isinstance(data, dict) else None
+    out = {
+        "amount": amount,
+        "from": cur_from,
+        "to": cur_to,
+        "date": (data or {}).get("date") if isinstance(data, dict) else "",
+        "result": (rates or {}).get(cur_to) if isinstance(rates, dict) else None,
+        "provider": "frankfurter.app (ECB)",
+    }
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+async def _fx_convert_async(args: dict[str, Any]) -> ToolResult:
+    try:
+        amount = float(str(args.get("amount", "") or "").replace(",", "."))
+    except Exception:
+        return ToolResult(status="error", error="informe amount")
+
+    cur_from = str(args.get("from", "") or args.get("base", "") or "").strip().upper()
+    cur_to = str(args.get("to", "") or args.get("target", "") or "").strip().upper()
+    if not re.fullmatch(r"[A-Z]{3}", cur_from) or not re.fullmatch(r"[A-Z]{3}", cur_to):
+        return ToolResult(status="error", error="informe from/to como código de moeda (ex: USD, BRL)")
+
+    params = {"amount": amount, "from": cur_from, "to": cur_to}
+    data, err = await _http_json_async(method="GET", url="https://api.frankfurter.app/latest", params=params, timeout_s=12.0)
     if err:
         return ToolResult(status="error", error=err)
 

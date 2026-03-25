@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Awaitable
 
 from omniscia.core.types import ToolResult
 from omniscia.core.approvals import ApprovalStore
@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 ToolFn = Callable[[dict[str, Any]], ToolResult]
+ToolAsyncFn = Callable[[dict[str, Any]], Awaitable[ToolResult]]
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class ToolSpec:
     description: str
     risk: str = "LOW"  # risco intrínseco da ferramenta (ajuda a composição de risco)
     fn: ToolFn | None = None
+    async_fn: ToolAsyncFn | None = None
 
 
 class ToolRegistry:
@@ -44,7 +46,7 @@ class ToolRegistry:
     def register(self, spec: ToolSpec) -> None:
         if spec.name in self._tools:
             raise ValueError(f"Tool já registrada: {spec.name}")
-        if spec.fn is None:
+        if spec.fn is None and spec.async_fn is None:
             raise ValueError(f"Tool sem função: {spec.name}")
         self._tools[spec.name] = spec
 
@@ -59,8 +61,29 @@ class ToolRegistry:
     def run(self, name: str, args: dict[str, Any]) -> ToolResult:
         spec = self.get(name)
         try:
-            assert spec.fn is not None
+            if spec.fn is None:
+                raise RuntimeError(f"Tool é async-only: {name}")
             return spec.fn(args)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Tool falhou: %s", name)
+            return ToolResult(status="error", error=str(exc))
+
+    async def run_async(self, name: str, args: dict[str, Any]) -> ToolResult:
+        """Executa uma tool de forma async.
+
+        - Se a tool tiver `async_fn`, usa ela.
+        - Senão, executa `fn` síncrona em thread via asyncio.to_thread.
+        """
+
+        import asyncio
+
+        spec = self.get(name)
+        try:
+            if spec.async_fn is not None:
+                return await spec.async_fn(args)
+            if spec.fn is None:
+                raise RuntimeError(f"Tool sem função: {name}")
+            return await asyncio.to_thread(spec.fn, args)
         except Exception as exc:  # noqa: BLE001
             logger.exception("Tool falhou: %s", name)
             return ToolResult(status="error", error=str(exc))
@@ -140,6 +163,7 @@ def build_default_registry(*, settings=None, memory_store=None) -> ToolRegistry:
             f"autonomy_enabled={getattr(effective, 'autonomy_enabled', False)}",
             f"autonomy_max_steps={getattr(effective, 'autonomy_max_steps', 12)}",
             f"autonomy_checkpoint_every={getattr(effective, 'autonomy_checkpoint_every', 4)}",
+                f"async_enabled={getattr(effective, 'async_enabled', False)}",
             "",
             "== LLM ==",
             f"llm_provider={effective.llm_provider or ''}",
