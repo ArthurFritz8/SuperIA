@@ -884,9 +884,13 @@ def _route_heuristic(user_message: str, *, context_messages: list[dict[str, str]
         handled = run_heuristic_handlers(user_message=msg, norm=norm, context_messages=context_messages)
         if handled is not None:
             return handled
-    except Exception:
-        # Fallback silencioso para manter robustez (o legado cobre o resto)
-        pass
+    except Exception as exc:  # noqa: BLE001
+        # Heurística nunca deve derrubar o router; fallback para o legado.
+        # Mas não pode falhar silenciosamente: precisamos de visibilidade.
+        logger.warning("run_heuristic_handlers falhou: %s", exc, exc_info=True)
+
+    # A partir daqui, começa o legado. Mantemos apenas enquanto migramos regras
+    # para handlers determinísticos em `heuristic_handlers.py`.
 
     def _infer_subject_from_context(ctx: list[dict[str, str]] | None) -> str | None:
         """Tenta inferir o assunto/entidade recente (best-effort).
