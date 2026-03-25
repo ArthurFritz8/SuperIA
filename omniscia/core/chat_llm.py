@@ -131,6 +131,66 @@ def _has_llm_config_values(provider: str | None, model: str | None, api_key: str
     return bool((provider or "").strip() and (model or "").strip() and (has_key or not needs_key))
 
 
+def _build_chat_messages(
+    settings: Settings,
+    user_message: str,
+    *,
+    history: list[dict[str, str]] | None,
+    image_path: str | None,
+    profile_context: str | None,
+) -> tuple[str, list[dict[str, Any]]]:
+    system = (
+        "Você é VOID, um assistente estilo Jarvis, útil, direto e humano no tom (sem fingir ser humano). "
+        "Responda em PT-BR por padrão, a menos que o usuário peça outro idioma ou o PERFIL_DO_USUARIO indique outra preferência. "
+        "Quando a pergunta for ambígua, faça 1-3 perguntas objetivas. "
+        "Demonstre empatia e bom senso (ex.: reconhecer frustração), mas NÃO afirme ter sentimentos, consciência ou experiências pessoais. "
+        "Não invente que viu a tela/janela; você só pode comentar sobre a tela se o usuário fornecer uma captura/OCR explicitamente. "
+        "Se o usuário pedir apenas dicas/orientação (ex.: jogos), responda com passos práticos e opções, sem tools."
+    )
+
+    msgs: list[dict[str, Any]] = [{"role": "system", "content": system}]
+
+    if profile_context and str(profile_context).strip():
+        msgs.append({"role": "assistant", "content": str(profile_context).strip()[:1400]})
+
+    if history:
+        for m in history:
+            role = (m.get("role") or "").strip().lower()
+            content = str(m.get("content") or "")
+            if role in {"user", "assistant"} and content.strip():
+                msgs.append({"role": role, "content": content})
+
+    user_text = str(user_message or "").strip()
+    if getattr(settings, "vlm_enabled", False) and image_path:
+        try:
+            from omniscia.core.vlm import image_file_to_data_url
+
+            enc = image_file_to_data_url(image_path)
+            msgs.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                user_text
+                                + "\n\n[Contexto] O usuário anexou uma captura de tela (screenshot). "
+                                + "Use a imagem para responder com precisão."
+                            ),
+                        },
+                        {"type": "image_url", "image_url": {"url": enc.data_url}},
+                    ],
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info("VLM indisponivel; seguindo sem imagem: %s", redact_secrets(str(exc)))
+            msgs.append({"role": "user", "content": user_text})
+    else:
+        msgs.append({"role": "user", "content": user_text})
+
+    return user_text, msgs
+
+
 def chat_reply(
     settings: Settings,
     user_message: str,
@@ -162,58 +222,13 @@ def chat_reply(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Dependência ausente: litellm") from exc
 
-    system = (
-        "Você é VOID, um assistente estilo Jarvis, útil, direto e humano no tom (sem fingir ser humano). "
-        "Responda em PT-BR por padrão, a menos que o usuário peça outro idioma ou o PERFIL_DO_USUARIO indique outra preferência. "
-        "Quando a pergunta for ambígua, faça 1-3 perguntas objetivas. "
-        "Demonstre empatia e bom senso (ex.: reconhecer frustração), mas NÃO afirme ter sentimentos, consciência ou experiências pessoais. "
-        "Não invente que viu a tela/janela; você só pode comentar sobre a tela se o usuário fornecer uma captura/OCR explicitamente. "
-        "Se o usuário pedir apenas dicas/orientação (ex.: jogos), responda com passos práticos e opções, sem tools." 
+    user_text, msgs = _build_chat_messages(
+        settings,
+        user_message,
+        history=history,
+        image_path=image_path,
+        profile_context=profile_context,
     )
-
-    msgs: list[dict[str, Any]] = [{"role": "system", "content": system}]
-
-    # Perfil persistente (memória de longo prazo): usado para preferências de tom/idioma/estilo.
-    # Inserimos como contexto do assistente para manter compatibilidade com providers.
-    if profile_context and str(profile_context).strip():
-        msgs.append({"role": "assistant", "content": str(profile_context).strip()[:1400]})
-
-    if history:
-        for m in history:
-            role = (m.get("role") or "").strip().lower()
-            content = str(m.get("content") or "")
-            if role in {"user", "assistant"} and content.strip():
-                msgs.append({"role": role, "content": content})
-
-    # Optional: attach image for multimodal providers/models.
-    # This is opt-in and may send screen content over the network.
-    user_text = str(user_message or "").strip()
-    if getattr(settings, "vlm_enabled", False) and image_path:
-        try:
-            from omniscia.core.vlm import image_file_to_data_url
-
-            enc = image_file_to_data_url(image_path)
-            msgs.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                user_text
-                                + "\n\n[Contexto] O usuário anexou uma captura de tela (screenshot). "
-                                + "Use a imagem para responder com precisão."
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": enc.data_url}},
-                    ],
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info("VLM indisponivel; seguindo sem imagem: %s", redact_secrets(str(exc)))
-            msgs.append({"role": "user", "content": user_text})
-    else:
-        msgs.append({"role": "user", "content": user_text})
 
     max_tokens = _env_int("OMNI_CHAT_MAX_TOKENS", 256)
     timeout_s = float(os.getenv("OMNI_CHAT_TIMEOUT_S", "45").strip() or "45")
@@ -343,54 +358,13 @@ async def chat_reply_async(
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError("Dependência ausente: litellm") from exc
 
-    system = (
-        "Você é VOID, um assistente estilo Jarvis, útil, direto e humano no tom (sem fingir ser humano). "
-        "Responda em PT-BR por padrão, a menos que o usuário peça outro idioma ou o PERFIL_DO_USUARIO indique outra preferência. "
-        "Quando a pergunta for ambígua, faça 1-3 perguntas objetivas. "
-        "Demonstre empatia e bom senso (ex.: reconhecer frustração), mas NÃO afirme ter sentimentos, consciência ou experiências pessoais. "
-        "Não invente que viu a tela/janela; você só pode comentar sobre a tela se o usuário fornecer uma captura/OCR explicitamente. "
-        "Se o usuário pedir apenas dicas/orientação (ex.: jogos), responda com passos práticos e opções, sem tools."
+    user_text, msgs = _build_chat_messages(
+        settings,
+        user_message,
+        history=history,
+        image_path=image_path,
+        profile_context=profile_context,
     )
-
-    msgs: list[dict[str, Any]] = [{"role": "system", "content": system}]
-
-    if profile_context and str(profile_context).strip():
-        msgs.append({"role": "assistant", "content": str(profile_context).strip()[:1400]})
-
-    if history:
-        for m in history:
-            role = (m.get("role") or "").strip().lower()
-            content = str(m.get("content") or "")
-            if role in {"user", "assistant"} and content.strip():
-                msgs.append({"role": role, "content": content})
-
-    user_text = str(user_message or "").strip()
-    if getattr(settings, "vlm_enabled", False) and image_path:
-        try:
-            from omniscia.core.vlm import image_file_to_data_url
-
-            enc = image_file_to_data_url(image_path)
-            msgs.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                user_text
-                                + "\n\n[Contexto] O usuário anexou uma captura de tela (screenshot). "
-                                + "Use a imagem para responder com precisão."
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": enc.data_url}},
-                    ],
-                }
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.info("VLM indisponivel; seguindo sem imagem: %s", redact_secrets(str(exc)))
-            msgs.append({"role": "user", "content": user_text})
-    else:
-        msgs.append({"role": "user", "content": user_text})
 
     max_tokens = _env_int("OMNI_CHAT_MAX_TOKENS", 256)
     timeout_s = float(os.getenv("OMNI_CHAT_TIMEOUT_S", "45").strip() or "45")

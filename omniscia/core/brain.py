@@ -41,6 +41,21 @@ from omniscia.core.wakeword import extract_after_wake_word
 from omniscia.core.chat_llm import chat_reply
 from omniscia.core.chat_llm import warmup_llm_best_effort
 from omniscia.core.chat_llm import chat_reply_async
+from omniscia.core.tool_runner import ToolRunner
+from omniscia.core.tool_schemas import (
+    DevExecArgs,
+    EduPdfWordAutofillArgs,
+    FsCopyArgs,
+    FsListDirArgs,
+    FsMoveArgs,
+    FsReadTextArgs,
+    GameAutoplayArgs,
+    GameCalibrateRunnerArgs,
+    GameTrexAutoplayArgs,
+    WebGetPageTextArgs,
+    WebResearchArgs,
+    WriteFileArgs,
+)
 from omniscia.core.workers import WorkerManager
 from omniscia.core.react_fsm import execute_plan_react as _react_execute_plan_react
 from omniscia.core.react_fsm import execute_plan_react_async as _react_execute_plan_react_async
@@ -77,6 +92,23 @@ class BrainContext:
 def build_brain_context(settings: Settings, *, console: Console) -> BrainContext:
     memory = JsonlMemoryStore()
     registry = build_default_registry(settings=settings, memory_store=memory)
+
+    # ToolRunner centralizado (Sprint 1): valida args do plano antes de executar tools.
+    runner = ToolRunner(registry)
+    runner.register_schema("web.research", WebResearchArgs)
+    runner.register_schema("web.get_page_text", WebGetPageTextArgs)
+    runner.register_schema("fs.list_dir", FsListDirArgs)
+    runner.register_schema("fs.read_text", FsReadTextArgs)
+    runner.register_schema("fs.copy", FsCopyArgs)
+    runner.register_schema("fs.move", FsMoveArgs)
+    runner.register_schema("write_file", WriteFileArgs)
+    runner.register_schema("dev.exec", DevExecArgs)
+    runner.register_schema("game.autoplay", GameAutoplayArgs)
+    runner.register_schema("game.calibrate_runner_from_mouse", GameCalibrateRunnerArgs)
+    runner.register_schema("game.trex_autoplay", GameTrexAutoplayArgs)
+    runner.register_schema("edu.pdf_word_autofill", EduPdfWordAutofillArgs)
+    # Settings é frozen; anexamos via setattr controlado para evitar mudar API pública.
+    object.__setattr__(settings, "_tool_runner", runner)
     profile_store = UserProfileStore()
 
     approvals = ApprovalStore(getattr(settings, "hitl_approvals_path", "data/hitl_approvals.json"))
@@ -1150,7 +1182,11 @@ def _run_tool_with_retry(console: Console, settings: Settings, registry, call: T
             if sleep_s:
                 time.sleep(sleep_s)
 
-        result = registry.run(call.tool_name, call.args)
+        runner = getattr(settings, "_tool_runner", None)
+        if runner is not None:
+            result = runner.run(call.tool_name, call.args)
+        else:
+            result = registry.run(call.tool_name, call.args)
         memory.append(
             "tool_output",
             {
@@ -1201,11 +1237,15 @@ async def _run_tool_with_retry_async(
                 await asyncio.sleep(sleep_s)
 
         t = metrics.timer() if metrics is not None else None
-        run_async = getattr(registry, "run_async", None)
-        if callable(run_async):
-            result = await run_async(call.tool_name, call.args)  # type: ignore[misc]
+        runner = getattr(settings, "_tool_runner", None)
+        if runner is not None:
+            result = await runner.run_async(call.tool_name, call.args)
         else:
-            result = await asyncio.to_thread(registry.run, call.tool_name, call.args)
+            run_async = getattr(registry, "run_async", None)
+            if callable(run_async):
+                result = await run_async(call.tool_name, call.args)  # type: ignore[misc]
+            else:
+                result = await asyncio.to_thread(registry.run, call.tool_name, call.args)
         if metrics is not None and t is not None:
             metrics.observe_ms(f"tool.{call.tool_name}.ms", t)
             metrics.inc(f"tool.{call.tool_name}.calls")

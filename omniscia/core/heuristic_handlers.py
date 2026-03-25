@@ -247,6 +247,217 @@ def _infer_subject_from_context(ctx: list[dict[str, str]] | None) -> str | None:
 
     return None
 
+class FearGreedIndexHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        norm = _normalize(msg)
+        if re.search(
+            r"\b(fear\s*\&\s*greed|fear\s+and\s+greed|medo\s+e\s+gan[aâ]ncia|indice\s+de\s+medo)\b",
+            norm,
+        ):
+            return Plan(
+                intent="finance.fear_greed_index",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="finance.fear_greed_index", args={"limit": 1})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar o índice Fear & Greed.",
+            )
+        return None
+
+class ISSPositionHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        norm = _normalize(msg)
+        if re.search(r"\biss\b", norm) and re.search(
+            r"\b(onde|posi[cç][aã]o|localiza[cç][aã]o|agora|neste\s+momento)\b",
+            norm,
+        ):
+            return Plan(
+                intent="space.iss_position",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="space.iss_position", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a posição atual da ISS.",
+            )
+        return None
+
+class EarthquakeUSGSHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        norm = _normalize(msg)
+        if not re.search(r"\b(terremoto|terremotos|sismo|sismos|earthquake|earthquakes)\b", norm):
+            return None
+
+        days = 7
+        m_days = re.search(r"\b(\d{1,2})\s*(dias|dia)\b", norm)
+        if m_days:
+            try:
+                days = int(m_days.group(1) or 7)
+            except Exception:
+                days = 7
+
+        min_mag = 4.5
+        m_mag = re.search(r"\b(mag(?:nitude)?|m)\s*(\d+(?:[\.,]\d+)?)\b", norm)
+        if m_mag:
+            try:
+                min_mag = float((m_mag.group(2) or "4.5").replace(",", "."))
+            except Exception:
+                min_mag = 4.5
+
+        return Plan(
+            intent="science.earthquake_usgs",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(
+                    tool_name="science.earthquake_usgs",
+                    args={"days": days, "min_magnitude": min_mag, "limit": 10},
+                )
+            ],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou listar terremotos recentes (USGS).",
+        )
+
+class CovidStatsHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        m = re.search(r"\b(covid)\b(?:\s+(no|na|em)\s+(.+))?$", msg, flags=re.IGNORECASE)
+        if not m:
+            return None
+        country = (m.group(3) or "").strip().strip('"\'')
+        args: dict[str, Any] = {}
+        if country and _normalize(country) not in {"mundo", "global", "geral"}:
+            args["country"] = country
+        return Plan(
+            intent="health.covid_stats",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="health.covid_stats", args=args)],
+            risk=RiskLevel.MEDIUM,
+            final_response="Ok — vou consultar estatísticas de COVID.",
+        )
+
+class ServiceStatusHandler(HeuristicHandler):
+    _SERVICE_TOOL_BY_KEYWORD: list[tuple[str, str]] = [
+        ("github", "status.github"),
+        ("cloudflare", "status.cloudflare"),
+        ("docker", "status.docker"),
+        ("atlassian", "status.atlassian"),
+        ("zoom", "status.zoom"),
+        ("gitlab", "status.gitlab"),
+        ("npm", "status.npm"),
+        ("openai", "status.openai"),
+        ("open ai", "status.openai"),
+    ]
+
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        norm = _normalize(msg)
+        if not re.search(r"\bstatus\b", norm):
+            return None
+        for keyword, tool_name in self._SERVICE_TOOL_BY_KEYWORD:
+            if keyword in norm:
+                return Plan(
+                    intent=tool_name,
+                    user_message=msg,
+                    tool_calls=[ToolCall(tool_name=tool_name, args={})],
+                    risk=RiskLevel.MEDIUM,
+                    final_response=f"Ok — vou consultar o status de {keyword}.",
+                )
+        return None
+
+class ArticSearchHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        m = re.search(
+            r"\b(art\s*institute\s*of\s*chicago|aic|artic)\b\s*[:\-]\s*(.+)$",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="art.artic_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="art.artic_search", args={"query": q, "limit": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar no acervo do Art Institute of Chicago.",
+            )
+        return None
+
+class ChessComHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        norm = _normalize(msg)
+
+        m = re.search(r"\bchess\b\s*stats\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            user = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="chess.chesscom_stats",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_stats", args={"username": user})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar estatísticas no Chess.com.",
+            )
+
+        if re.search(r"\bchess\b", norm) and re.search(r"\bpuzzle\b", norm):
+            return Plan(
+                intent="chess.chesscom_daily_puzzle",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_daily_puzzle", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar o puzzle diário do Chess.com.",
+            )
+
+        m = re.search(r"\bchess\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            user = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="chess.chesscom_player",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_player", args={"username": user})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar o perfil do jogador no Chess.com.",
+            )
+        return None
+
+class OpenBreweryDBHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        m = re.search(r"\b(cervejarias|brewery|breweries)\b\s*[:\-]\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="drink.openbrewerydb_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="drink.openbrewerydb_search", args={"query": q, "limit": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar cervejarias (Open Brewery DB).",
+            )
+        return None
+
+class DeckOfCardsHandler(HeuristicHandler):
+    def handle(self, user_message: str, *, context_messages: list[dict[str, str]] | None = None) -> Plan | None:
+        msg = user_message
+        m = re.search(r"\b(cartas|cards)\b\s*[:\-]\s*(\d{1,2})\b", msg, flags=re.IGNORECASE)
+        if m:
+            try:
+                n = int(m.group(2) or 1)
+            except Exception:
+                n = 1
+            return Plan(
+                intent="fun.deck_draw",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.deck_draw", args={"count": n})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou sacar cartas (Deck of Cards API).",
+            )
+        return None
+
+
+def _infer_coin_from_context(ctx: list[dict[str, Any]] | None) -> str | None:
+    # Back-compat: delega para `_infer_subject_from_context`.
+    return _infer_subject_from_context(ctx)  # type: ignore[arg-type]
+
 
 @dataclass(frozen=True)
 class NumericOnlyHandler:
@@ -2319,6 +2530,15 @@ _HANDLERS: tuple[HeuristicHandler, ...] = (
     JgraspHelloWorldHandler(),
     HolidaysHandlers(),
     CrossrefHandlers(),
+    FearGreedIndexHandler(),
+    ISSPositionHandler(),
+    EarthquakeUSGSHandler(),
+    CovidStatsHandler(),
+    ServiceStatusHandler(),
+    ArticSearchHandler(),
+    ChessComHandler(),
+    OpenBreweryDBHandler(),
+    DeckOfCardsHandler(),
 )
 
 
