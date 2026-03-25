@@ -291,12 +291,45 @@ def _looks_like_chat_message(norm: str) -> bool:
     return True
 
 
+def _is_greeting(norm: str) -> bool:
+    """Detecta cumprimentos curtos (para resposta instantânea e determinística).
+
+    Importante:
+    - `norm` deve vir de `_normalize()` (sem acentos, lowercase).
+    - Só casa mensagens curtas; se houver mais conteúdo, deixa seguir o fluxo normal.
+    """
+
+    n = (norm or "").strip()
+    if not n:
+        return False
+
+    # Exemplos: "oi", "ola", "olá", "bom dia", "boa tarde", "boa noite",
+    # "oi tudo bem", "ola!"
+    return bool(
+        re.fullmatch(
+            r"(oi|ola|opa|eai|e\s*ai|salve|bom\s+dia|boa\s+tarde|boa\s+noite)(\s+tudo\s+bem)?[!.?]*",
+            n,
+        )
+    )
+
+
 def route(settings: Settings, user_message: str) -> Plan:
     # Exit must be handled deterministically before any LLM routing.
     # Otherwise the LLM may hallucinate a destructive action (e.g., shutdown).
     if _normalize(user_message) in {"sair", "exit", "quit"}:
         msg = user_message.strip()
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
+
+    # Cumprimentos: resposta instantânea (sem router LLM e sem tools).
+    norm = _normalize(user_message)
+    if _is_greeting(norm):
+        return Plan(
+            intent="chat",
+            user_message=user_message.strip(),
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Oi! Em que posso te ajudar?",
+        )
 
     # Prefer deterministic heuristics whenever they match.
     # This improves UX (no latency/quota) and avoids LLM hallucinations.
@@ -343,6 +376,17 @@ def route_with_registry(
     if _normalize(user_message) in {"sair", "exit", "quit"}:
         msg = user_message.strip()
         return Plan(intent="exit", user_message=msg, final_response="Encerrando.")
+
+    # Cumprimentos: resposta instantânea (sem router LLM e sem tools).
+    norm = _normalize(user_message)
+    if _is_greeting(norm):
+        return Plan(
+            intent="chat",
+            user_message=user_message.strip(),
+            tool_calls=[],
+            risk=RiskLevel.LOW,
+            final_response="Oi! Em que posso te ajudar?",
+        )
 
     heuristic = _route_heuristic(user_message, context_messages=context_messages)
 
@@ -458,6 +502,17 @@ def route_llm(
     def _asked_for_dev_exec(n: str) -> bool:
         return bool(re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell|python)\b", n))
 
+    def _asked_for_os_action(n: str) -> bool:
+        # Só liberamos ações no SO quando o usuário pedir explicitamente.
+        # Exemplos: "abre o youtube", "abra o chrome", "feche o discord", ou uma URL explícita.
+        if re.search(r"\b(abrir|abra|abre|open|fechar|feche|fecha|close)\b", n):
+            return True
+        if re.search(r"\bhttps?://\S+\b", n):
+            return True
+        if re.search(r"\bwww\.[^\s]+\b", n):
+            return True
+        return False
+
     def _asked_for_web_or_data(n: str) -> bool:
         # Só permitimos web/public APIs quando o usuário pedir explicitamente.
         # Isso evita buscas automáticas que geram captcha/blocks e melhora a UX.
@@ -471,6 +526,7 @@ def route_llm(
     asked_screen_or_gui = _asked_for_screen_or_gui(norm)
     asked_dev = _asked_for_dev_exec(norm)
     asked_web = _asked_for_web_or_data(norm)
+    asked_os = _asked_for_os_action(norm)
 
     def _has_forbidden_tools(p: Plan) -> bool:
         for c in p.tool_calls:
@@ -478,6 +534,11 @@ def route_llm(
             if name.startswith(("screen.", "gui.")) or name in {"win.focus_window"}:
                 if not asked_screen_or_gui:
                     return True
+
+            # OS side-effects (abrir/fechar apps/URLs) só quando solicitado.
+            if name in {"os.open_url", "os.open_app", "os.open_explorer", "os.close_app"} and not asked_os:
+                return True
+
             if name.startswith("dev.") and not asked_dev:
                 return True
             if name.startswith("web.") and not asked_web:
@@ -3729,7 +3790,7 @@ def _route_with_llm_messages(
         fb_base = getattr(settings, "llm_fallback_base_url", None)
 
         if _has_llm_config_values(fb_provider, fb_model, fb_key):
-            logger.warning(
+            logger.info(
                 "Falha no router LLM principal; tentando fallback (%s)",
                 _short_err(e),
             )
@@ -3745,13 +3806,13 @@ def _route_with_llm_messages(
                 )
                 return _call_router_llm(fb_settings)
             except Exception as e2:  # noqa: BLE001
-                logger.warning(
+                logger.info(
                     "Falha ao rotear via LLM (principal+fallback); caindo no heurístico (%s)",
                     _short_err(e2),
                 )
                 return None
 
-        logger.warning(
+        logger.info(
             "Falha ao rotear via LLM; caindo no heurístico (%s)",
             _short_err(e),
         )
