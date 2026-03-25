@@ -40,6 +40,7 @@ from omniscia.core.types import Plan, RiskLevel, ToolCall
 from omniscia.core.wakeword import extract_after_wake_word
 from omniscia.core.chat_llm import chat_reply
 from omniscia.core.chat_llm import warmup_llm_best_effort
+from omniscia.core.chat_llm import chat_reply_async
 from omniscia.core.workers import WorkerManager
 from omniscia.core.react_fsm import execute_plan_react as _react_execute_plan_react
 from omniscia.core.react_fsm import execute_plan_react_async as _react_execute_plan_react_async
@@ -472,13 +473,25 @@ def run_brain_loop(settings: Settings) -> None:
                     ):
                         image_path = None
 
-                response_text = chat_reply(
-                    settings,
-                    effective_user_message,
-                    history=history,
-                    image_path=image_path,
-                    profile_context=profile_ctx,
-                )
+                # Chat LLM: preferir caminho async nativo quando habilitado.
+                if getattr(settings, "async_enabled", False):
+                    response_text = asyncio.run(
+                        chat_reply_async(
+                            settings,
+                            effective_user_message,
+                            history=history,
+                            image_path=image_path,
+                            profile_context=profile_ctx,
+                        )
+                    )
+                else:
+                    response_text = chat_reply(
+                        settings,
+                        effective_user_message,
+                        history=history,
+                        image_path=image_path,
+                        profile_context=profile_ctx,
+                    )
                 console.print(f"Agente> {response_text}")
                 memory.append("agent_response", {"text": response_text})
 

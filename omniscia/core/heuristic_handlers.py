@@ -259,11 +259,7 @@ class NumericOnlyHandler:
             user_message=msg,
             tool_calls=[],
             risk=RiskLevel.LOW,
-            final_response=(
-                "Eu não uso números como seleção de menu. "
-                "Se você quer que eu execute a automação, repita o pedido completo (ex.: 'faça as atividades do PDF no Word'), "
-                "ou diga explicitamente: 'pode executar agora' depois de colocar o PDF em foco."
-            ),
+            final_response="Posso ajudar — o que você quer fazer com esse número?",
         )
 
 
@@ -871,6 +867,675 @@ class PublicApisHandlers:
 
 
 @dataclass(frozen=True)
+class MorePublicApisHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        # OSV query por pacote+versão — explícito
+        m = re.search(
+            r"\b(osv)\b\s*[:\-]?\s*(PyPI|pypi|pip|npm|node|crates(?:\.io)?|rust|RubyGems|rubygems|Maven|maven|NuGet|nuget|Go|go)\s+([^\s]{1,120})\s+([^\s]{1,60})\b",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m:
+            eco = (m.group(2) or "").strip()
+            name = (m.group(3) or "").strip()
+            ver = (m.group(4) or "").strip()
+            return Plan(
+                intent="sec.osv_query",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(
+                        tool_name="sec.osv_query",
+                        args={"ecosystem": eco, "name": name, "version": ver, "limit": 10},
+                    )
+                ],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou checar vulnerabilidades para essa versão (OSV.dev).",
+            )
+
+        # PyPI project — explícito
+        m = re.search(r"\b(pypi|pip)\b\s*[:\-]?\s*([A-Za-z0-9_\.\-]{1,80})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            pkg = (m.group(2) or "").strip()
+            return Plan(
+                intent="pkg.pypi_project",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="pkg.pypi_project", args={"name": pkg})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar metadados do projeto no PyPI.",
+            )
+
+        # npm package — explícito
+        m = re.search(r"\b(npm)\b\s*[:\-]?\s*([^\s]{1,160})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip() and not re.search(r"\bnpm\s+downloads\b", norm):
+            pkg = (m.group(2) or "").strip()
+            return Plan(
+                intent="pkg.npm_package",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="pkg.npm_package", args={"name": pkg})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar metadados do pacote no npm registry.",
+            )
+
+        # crates.io crate — explícito
+        m = re.search(r"\b(crates(?:\.io)?)\b\s*[:\-]?\s*([A-Za-z0-9_\-]{1,64})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            crate = (m.group(2) or "").strip()
+            return Plan(
+                intent="pkg.cratesio_crate",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="pkg.cratesio_crate", args={"name": crate})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar metadados do crate no crates.io.",
+            )
+
+        # DNS resolve — explícito
+        m = re.search(
+            r"\b(dns|resolve)\b\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253})(?:\s+(A|AAAA|CNAME|MX|TXT))?$",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m and (m.group(2) or "").strip():
+            host = (m.group(2) or "").strip().strip('"\'').rstrip(".")
+            rtype = (m.group(3) or "A").strip().upper()
+            return Plan(
+                intent="net.dns_google_resolve",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.dns_google_resolve", args={"name": host, "type": rtype})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou resolver DNS via Google (DoH).",
+            )
+
+        # RDAP domain — explícito
+        m = re.search(
+            r"\b(rdap\s+domain|rdap|whois)\b\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253}\.[A-Za-z]{2,24})\b",
+            msg,
+            flags=re.IGNORECASE,
+        )
+        if m and (m.group(2) or "").strip():
+            domain = (m.group(2) or "").strip().strip('"\'').rstrip(".")
+            return Plan(
+                intent="net.rdap_domain",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.rdap_domain", args={"domain": domain})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar RDAP para esse domínio.",
+            )
+
+        # RDAP IP — explícito
+        m = re.search(r"\b(rdap\s+ip|whois\s+ip|rdap)\b\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            ip = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.rdap_ip",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.rdap_ip", args={"ip": ip})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar RDAP para esse IP.",
+            )
+
+        # BGPView IP — explícito
+        m = re.search(r"\b(bgp\s*ip|bgp)\b\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            ip = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.bgpview_ip",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.bgpview_ip", args={"ip": ip})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar dados BGP/ASN para esse IP.",
+            )
+
+        # BGPView ASN — explícito (evita capturar "ripestat asn" / "peeringdb asn")
+        m = re.search(r"\b(bgp\s*asn|asn\s*[:\-]?)\b\s*(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip() and not re.search(r"\b(ripestat|ripe\s*stat|peeringdb|peering\s*db)\b", norm):
+            asn = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.bgpview_asn",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.bgpview_asn", args={"asn": asn})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar informações desse ASN.",
+            )
+
+        # "meu ip"
+        if re.search(r"\bmeu\s+ip\b", norm):
+            return Plan(
+                intent="net.ip_info",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.ip_info", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar seu IP público.",
+            )
+
+        # asn: 15169 (BGPView)
+        m = re.search(r"\basn\b\s*[:\-]?\s*(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip() and not re.search(r"\b(ripestat|ripe\s*stat|peeringdb|peering\s*db)\b", norm):
+            asn = (m.group(1) or "").strip()
+            return Plan(
+                intent="net.bgpview_asn",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.bgpview_asn", args={"asn": asn})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar informações desse ASN.",
+            )
+
+        # random user
+        if re.search(r"\b(pessoa\s+aleat[oó]ria|random\s+user)\b", norm):
+            return Plan(
+                intent="people.random_user",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="people.random_user", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou gerar uma pessoa aleatória.",
+            )
+
+        # qr
+        m = re.search(r"\bqr\b\s*[:\-]?\s*(https?://\S+)", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            url = (m.group(1) or "").strip()
+            return Plan(
+                intent="utils.qr_code_url",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="utils.qr_code_url", args={"url": url})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou gerar o QR code.",
+            )
+
+        # osv vuln by CVE
+        if re.fullmatch(r"cve-\d{4}-\d{4,7}", norm, flags=re.IGNORECASE):
+            return Plan(
+                intent="sec.osv_vuln",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.osv_vuln", args={"vuln_id": norm.upper()})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o OSV para esse CVE.",
+            )
+
+        # npm downloads last week
+        m = re.search(r"\bnpm\s+downloads\b\s*[:\-]?\s*([a-zA-Z0-9_\-\.]{1,80})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            pkg = (m.group(1) or "").strip()
+            return Plan(
+                intent="pkg.npm_downloads_last_week",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="pkg.npm_downloads_last_week", args={"package": pkg})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar downloads da última semana (npm).",
+            )
+
+        # npm: <pkg>
+        m = re.search(r"\bnpm\b\s*[:\-]?\s*([a-zA-Z0-9_\-\.]{1,80})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            pkg = (m.group(1) or "").strip()
+            return Plan(
+                intent="pkg.npm_package",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="pkg.npm_package", args={"package": pkg})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o pacote no npm.",
+            )
+
+        # artic
+        m = re.search(r"\bartic\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            q = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="art.artic_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="art.artic_search", args={"query": q, "limit": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar no Art Institute of Chicago.",
+            )
+
+        # chess.com
+        m = re.search(r"\bchess\b\s*[:\-]?\s*([\w\-]{1,40})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip() and not re.search(r"\b(stats|puzzle)\b", norm):
+            username = (m.group(1) or "").strip()
+            return Plan(
+                intent="chess.chesscom_player",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_player", args={"username": username})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar o perfil no Chess.com.",
+            )
+
+        m = re.search(r"\bchess\b\s+stats\b\s*[:\-]?\s*([\w\-]{1,40})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            username = (m.group(1) or "").strip()
+            return Plan(
+                intent="chess.chesscom_stats",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_stats", args={"username": username})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar estatísticas no Chess.com.",
+            )
+
+        if re.search(r"\bchess\b.*\b(puzzle|daily\s+puzzle)\b", norm):
+            return Plan(
+                intent="chess.chesscom_daily_puzzle",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="chess.chesscom_daily_puzzle", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar o puzzle diário do Chess.com.",
+            )
+
+        # openbrewerydb
+        m = re.search(r"\b(cervejarias|brewery|breweries)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="drink.openbrewerydb_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="drink.openbrewerydb_search", args={"query": q, "per_page": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar cervejarias.",
+            )
+
+        # gutendex
+        m = re.search(r"\b(gutenberg|gutendex)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="books.gutendex_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="books.gutendex_search", args={"query": q, "limit": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar livros no Gutenberg.",
+            )
+
+        # openfoodfacts
+        m = re.search(r"\bopenfoodfacts\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            q = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="data.openfoodfacts_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="data.openfoodfacts_search", args={"query": q, "page_size": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar no OpenFoodFacts.",
+            )
+
+        # sunrise/sunset
+        m = re.search(r"\bsunrise\b\s*[:\-]?\s*([-+]?\d{1,2}(?:\.\d+)?)\s*,\s*([-+]?\d{1,3}(?:\.\d+)?)\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip() and (m.group(2) or "").strip():
+            lat = float(m.group(1))
+            lng = float(m.group(2))
+            return Plan(
+                intent="time.sunrise_sunset",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="time.sunrise_sunset", args={"lat": lat, "lng": lng})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar nascer/pôr do sol.",
+            )
+
+        # viacep
+        m = re.search(r"\bcep\b\s*[:\-]?\s*(\d{5}-?\d{3})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            cep = (m.group(1) or "").strip()
+            return Plan(
+                intent="br.viacep_lookup",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="br.viacep_lookup", args={"cep": cep})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o ViaCEP.",
+            )
+
+        # RIPEstat IP — explícito
+        m = re.search(r"\b(ripe\s*stat|ripestat)\b\s*(?:ip)?\s*[:\-]?\s*(\d{1,3}(?:\.\d{1,3}){3})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            ip = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.ripestat_ip",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.ripestat_ip", args={"ip": ip})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o RIPEstat para esse IP.",
+            )
+
+        # RIPEstat ASN — explícito
+        m = re.search(r"\b(ripe\s*stat|ripestat)\b\s*(?:asn)?\s*[:\-]?\s*(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            asn = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.ripestat_asn",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.ripestat_asn", args={"asn": asn})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o RIPEstat para esse ASN.",
+            )
+
+        # PeeringDB ASN — explícito
+        m = re.search(r"\b(peering\s*db|peeringdb)\b\s*[:\-]?\s*(?:asn\s*[:\-]?\s*)?(?:AS)?(\d{1,10})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            asn = (m.group(2) or "").strip()
+            return Plan(
+                intent="net.peeringdb_asn",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="net.peeringdb_asn", args={"asn": asn})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o PeeringDB para esse ASN.",
+            )
+
+        # crt.sh — explícito
+        m = re.search(r"\b(crt\s*sh|crtsh|certificados|certificates)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="sec.crtsh_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.crtsh_search", args={"query": q, "limit": 10})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar certificados em CT (crt.sh).",
+            )
+
+        # CISA KEV — explícito
+        m = re.search(r"\b(cisa\s+kev|kev)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="sec.cisa_kev_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.cisa_kev_search", args={"query": q, "limit": 10})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar no catálogo CISA KEV.",
+            )
+
+        # URLhaus — explícito
+        m = re.search(r"\burlhaus\b\s*(?:url)?\s*[:\-]?\s*(https?://\S+)\s*$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            u = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="sec.urlhaus_url",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.urlhaus_url", args={"url": u})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o URLhaus para essa URL.",
+            )
+
+        m = re.search(r"\burlhaus\b\s*(?:host|dom[íi]nio|domain)\s*[:\-]?\s*([A-Za-z0-9\-\.]{1,253})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            host = (m.group(1) or "").strip().strip('"\'').rstrip(".")
+            return Plan(
+                intent="sec.urlhaus_host",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.urlhaus_host", args={"host": host})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou consultar o URLhaus para esse host.",
+            )
+
+        # ThreatFox IOC — explícito
+        m = re.search(r"\b(threat\s*fox|threatfox)\b\s*(?:ioc)?\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            ioc = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="sec.threatfox_ioc_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.threatfox_ioc_search", args={"ioc": ioc, "limit": 10})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar esse IOC no ThreatFox.",
+            )
+
+        # Feodo Tracker — explícito
+        if re.search(r"\bfeodo\b", norm) and re.search(r"\btracker\b", norm):
+            return Plan(
+                intent="sec.feodotracker_ip_blocklist",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="sec.feodotracker_ip_blocklist", args={"limit": 20})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a blocklist do Feodo Tracker.",
+            )
+
+        # Hashlookup — explícito
+        if re.search(r"\bhash\s*lookup\b|\bhashlookup\b", norm):
+            algo = ""
+            if re.search(r"\bsha\s*256\b|\bsha256\b", norm):
+                algo = "sha256"
+            elif re.search(r"\bsha\s*1\b|\bsha1\b", norm):
+                algo = "sha1"
+            elif re.search(r"\bmd5\b", norm):
+                algo = "md5"
+
+            mh = re.search(r"\b([0-9a-fA-F]{32}|[0-9a-fA-F]{40}|[0-9a-fA-F]{64})\b", msg)
+            if mh and (mh.group(1) or "").strip():
+                h = (mh.group(1) or "").strip().lower()
+                if not algo:
+                    algo = {32: "md5", 40: "sha1", 64: "sha256"}.get(len(h), "")
+                if algo:
+                    return Plan(
+                        intent="sec.hashlookup",
+                        user_message=msg,
+                        tool_calls=[ToolCall(tool_name="sec.hashlookup", args={"algorithm": algo, "hash": h})],
+                        risk=RiskLevel.MEDIUM,
+                        final_response="Ok — vou consultar esse hash no Hashlookup (CIRCL).",
+                    )
+
+        return None
+
+
+@dataclass(frozen=True)
+class FunAndMediaHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        # piada
+        if re.search(r"\b(piada|joke)\b", norm):
+            return Plan(
+                intent="fun.joke",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.joke", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou contar uma piada.",
+            )
+
+        # trivia
+        if re.search(r"\b(trivia|quiz)\b", norm):
+            return Plan(
+                intent="fun.trivia",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.trivia", args={"amount": 5, "type": "multiple"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou pegar perguntas de trivia.",
+            )
+
+        # quote
+        if re.search(r"\b(quote|cita[cç][aã]o)\b", norm):
+            return Plan(
+                intent="fun.quote_random",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.quote_random", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar uma citação aleatória.",
+            )
+
+        # advice
+        if re.search(r"\b(conselho|advice)\b", norm):
+            return Plan(
+                intent="fun.advice",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.advice", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar um conselho.",
+            )
+
+        # bored activity
+        if re.search(r"\b(entediad[oa]|bored)\b", norm):
+            return Plan(
+                intent="fun.bored_activity",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.bored_activity", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou sugerir uma atividade.",
+            )
+
+        # fox image
+        if re.search(r"\b(raposa|fox)\b", norm):
+            return Plan(
+                intent="fun.fox_image",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.fox_image", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar uma imagem de raposa.",
+            )
+
+        # duck image
+        if re.search(r"\b(pato|duck)\b", norm) and re.search(r"\b(imagem|image)\b", norm):
+            return Plan(
+                intent="fun.duck_image",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.duck_image", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar uma imagem de pato.",
+            )
+
+        # cat fact
+        if re.search(r"\b(cat\s*fact|fato\s+de\s+gato)\b", norm):
+            return Plan(
+                intent="fun.cat_fact",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.cat_fact", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar um fato sobre gatos.",
+            )
+
+        # deck draw
+        m = re.search(r"\b(cartas|deck)\b\s*[:\-]?\s*(\d{1,2})\b", norm)
+        if m and (m.group(2) or "").strip():
+            n = int(m.group(2))
+            return Plan(
+                intent="fun.deck_draw",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.deck_draw", args={"count": n})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou sacar cartas.",
+            )
+
+        # dadjoke / jokeapi
+        if re.search(r"\b(dadjoke)\b", norm):
+            return Plan(
+                intent="fun.dadjoke",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.dadjoke", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar um dad joke.",
+            )
+        if re.search(r"\b(jokeapi)\b", norm):
+            return Plan(
+                intent="fun.jokeapi",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.jokeapi", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar uma piada (JokeAPI).",
+            )
+
+        # scryfall
+        m = re.search(r"\b(scryfall)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="cards.scryfall_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="cards.scryfall_search", args={"query": q})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar cartas (Scryfall).",
+            )
+        if re.search(r"\b(mtg\s*random)\b", norm):
+            return Plan(
+                intent="cards.scryfall_random",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="cards.scryfall_random", args={})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar uma carta aleatória (Scryfall).",
+            )
+
+        # rickmorty
+        m = re.search(r"\b(rickmorty)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="media.rickmorty_character_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="media.rickmorty_character_search", args={"name": q})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar personagens (Rick and Morty).",
+            )
+
+        # pokemon
+        m = re.search(r"\b(pokemon|pok[eé]mon)\b\s*[:\-]?\s*([\w\-]{1,40})\b", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            name_or_id = (m.group(2) or "").strip().lower()
+            return Plan(
+                intent="fun.pokemon_info",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="fun.pokemon_info", args={"name_or_id": name_or_id})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar informações do Pokémon.",
+            )
+
+        # letra de música
+        m = re.search(r"\b(letra|lyrics)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="media.lyrics",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="media.lyrics", args={"query": q})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a letra.",
+            )
+
+        return None
+
+
+@dataclass(frozen=True)
+class LanguageAndQaHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        m = re.search(r"\b(defina|definir|dicion[aá]rio|dictionary)\b\s+(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            w = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="language.dictionary_define",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="language.dictionary_define", args={"word": w, "lang": "en"})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar a definição.",
+            )
+
+        m = re.search(r"\b(stack\s*overflow|stackoverflow|stack\s*exchange|stackexchange)\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(2) or "").strip():
+            q = (m.group(2) or "").strip().strip('"\'')
+            return Plan(
+                intent="qa.stackexchange_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="qa.stackexchange_search", args={"query": q, "site": "stackoverflow", "pagesize": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar no Stack Overflow.",
+            )
+
+        return None
+
+
+@dataclass(frozen=True)
+class CodeSearchHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+        m = re.search(r"\bgithub\b\s*[:\-]?\s*(.+)$", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            q = (m.group(1) or "").strip().strip('"\'')
+            return Plan(
+                intent="code.github_repo_search",
+                user_message=msg,
+                tool_calls=[ToolCall(tool_name="code.github_repo_search", args={"query": q, "per_page": 5})],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou buscar repositórios no GitHub.",
+            )
+        return None
+
+
+@dataclass(frozen=True)
 class CryptoKnowledgeHandlers:
     def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
         msg = user_message.strip()
@@ -1459,14 +2124,183 @@ class CrossrefHandlers:
         )
 
 
+@dataclass(frozen=True)
+class CoreHelpHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        if not re.fullmatch(r"\b(ajuda|help|comandos)\b", norm):
+            return None
+        msg = user_message.strip()
+        return Plan(
+            intent="core.help",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="core.help", args={})],
+            risk=RiskLevel.LOW,
+            final_response="Ok — posso ajudar. Que tipo de tarefa você quer executar?",
+        )
+
+
+@dataclass(frozen=True)
+class ScaffoldProjectHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        m = re.search(r"\b(crie|criar|gera|gerar)\b.*\bprojeto\b.*\bpython\b", norm)
+        if not m:
+            return None
+        mm = re.search(r"\bchamad[oa]\b\s+([\w\-]{1,60})\b", norm)
+        project_name = (mm.group(1) if mm else "MeuProjeto").strip()
+        return Plan(
+            intent="dev.scaffold_project",
+            user_message=user_message.strip(),
+            tool_calls=[ToolCall(tool_name="dev.scaffold_project", args={"language": "python", "name": project_name})],
+            risk=RiskLevel.HIGH,
+            final_response=f"Ok — vou criar um projeto Python chamado {project_name}.",
+        )
+
+
+@dataclass(frozen=True)
+class TrexHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        if not re.search(r"\b(t\s*[- ]?rex|trex)\b", norm):
+            return None
+        if not re.search(r"\b(jogo|joguinho|autoplay|joga|jogar)\b", norm):
+            return None
+        msg = user_message.strip()
+        return Plan(
+            intent="game.trex_autoplay",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="game.trex_autoplay", args={})],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou jogar o T-Rex automaticamente.",
+        )
+
+
+@dataclass(frozen=True)
+class PdfWordAutofillHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        if not re.search(r"\bpdf\b", norm):
+            return None
+        if not re.search(r"\b(atividades|atividade|exerc[ií]cios|fa[cç]a|fazer)\b", norm):
+            return None
+
+        msg = user_message.strip()
+        solve_with_llm = bool(re.search(r"\b(responda|responder|respostas|responda\s+as\s+quest[oõ]es|responda\s+as\s+questões)\b", norm))
+
+        pdf_title_contains = None
+        m = re.search(r"\bpdf\b\s*\"([^\"]{1,200}\.pdf)\"", msg, flags=re.IGNORECASE)
+        if m:
+            pdf_title_contains = (m.group(1) or "").strip()
+        else:
+            m = re.search(r"\bPDF\b\s*\"([^\"]{1,200}\.pdf)\"", msg)
+            if m:
+                pdf_title_contains = (m.group(1) or "").strip()
+
+        output_mode = "word"
+        out_path = None
+
+        m = re.search(r"\bdocx\b\s*\"([^\"]{1,200}\.docx)\"", msg, flags=re.IGNORECASE)
+        if m and (m.group(1) or "").strip():
+            output_mode = "docx"
+            out_path = f"data/tmp/{(m.group(1) or '').strip()}"
+
+        if re.search(r"\b(gerar|gere)\b", norm) and re.search(r"\bdocxs?\b", norm) and out_path is None:
+            output_mode = "docx"
+            out_path = "data/tmp/atividades.docx"
+
+        if re.search(r"\b(gerar|gere)\b", norm) and re.search(r"\bpdf\b", norm) and out_path is None:
+            output_mode = "pdf"
+            out_path = "data/tmp/atividades.pdf"
+
+        if re.search(r"\b(gerar|gere)\b", norm) and re.search(r"\bdocx\b", norm) and out_path is None:
+            output_mode = "docx"
+            out_path = "data/tmp/atividades.docx"
+
+        if re.search(r"\b(área\s+de\s+trabalho|area\s+de\s+trabalho|desktop)\b", norm) and output_mode == "docx":
+            out_path = "desktop:/atividades.docx"
+
+        args: dict[str, object] = {
+            "solve_with_llm": solve_with_llm,
+            "output_mode": output_mode,
+        }
+        if pdf_title_contains:
+            args["pdf_title_contains"] = pdf_title_contains
+        else:
+            args["assume_focused_pdf"] = True
+
+        if out_path is not None:
+            args["out_path"] = out_path
+
+        return Plan(
+            intent="edu.pdf_word_autofill",
+            user_message=msg,
+            tool_calls=[ToolCall(tool_name="edu.pdf_word_autofill", args=args)],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou preencher as atividades do PDF no Word.",
+        )
+
+
+@dataclass(frozen=True)
+class CompileHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        if not re.search(r"\b(compila|compilar|compile|build)\b", norm):
+            return None
+        msg = user_message.strip()
+        return Plan(
+            intent="dev.exec",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(tool_name="dev.exec", args={"command": "python -m compileall -q omniscia"}),
+                ToolCall(tool_name="dev.exec", args={"command": "python -m pytest -q"}),
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou compilar e rodar os testes.",
+        )
+
+
+@dataclass(frozen=True)
+class GameAutoplayHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        if not re.search(r"\b(jogue|jogar|jogo|game|play)\b", norm):
+            return None
+        if re.search(r"\b(t\s*[- ]?rex|trex)\b", norm):
+            return None
+        if re.search(r"\b(online|competitiv|ranked|pvp|multiplayer)\b", norm):
+            return Plan(
+                intent="chat",
+                user_message=user_message.strip(),
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response="Não posso automatizar jogos online competitivos. Posso sugerir treinos offline ou dicas gerais.",
+            )
+        msg = user_message.strip()
+        return Plan(
+            intent="game.autoplay",
+            user_message=msg,
+            tool_calls=[
+                ToolCall(tool_name="game.calibrate_runner_from_mouse", args={}),
+                ToolCall(tool_name="game.autoplay", args={}),
+            ],
+            risk=RiskLevel.HIGH,
+            final_response="Ok — vou calibrar e jogar automaticamente.",
+        )
+
+
 _HANDLERS: tuple[HeuristicHandler, ...] = (
     NumericOnlyHandler(),
     SessionTogglesHandler(),
+    CoreHelpHandlers(),
     ProfilePrefsHandler(),
     StatusHandlers(),
     CoreOpsHandlers(),
     MemoryCompactHandler(),
+    ScaffoldProjectHandlers(),
+    PdfWordAutofillHandlers(),
+    CompileHandlers(),
+    TrexHandlers(),
+    GameAutoplayHandlers(),
     PublicApisHandlers(),
+    MorePublicApisHandlers(),
+    CodeSearchHandlers(),
+    LanguageAndQaHandlers(),
+    FunAndMediaHandlers(),
     CryptoKnowledgeHandlers(),
     FilesystemHandlers(),
     VSCodeConfigHandlers(),
