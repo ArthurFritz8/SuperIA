@@ -290,6 +290,14 @@ def _looks_like_chat_message(norm: str) -> bool:
     if re.search(r"\b(rode|rodar|executa|execute|comando|terminal|cmd|powershell)\b", n):
         return False
 
+    # Pedidos explícitos de programação/código (ex.: jGRASP/Java) não são chat.
+    has_programming_hint = bool(
+        re.search(r"\b(jgrasp|java|python|javascript|typescript|c\+\+|c#|csharp|html|css)\b", n)
+    )
+    has_build_verb = bool(re.search(r"\b(crie|criar|escreva|escrever|gere|gerar|fa[cç]a|faca|implemente|implementar|compile|compilar)\b", n))
+    if has_programming_hint and has_build_verb:
+        return False
+
     # Pedidos explícitos de web/pesquisa/APIs.
     if re.search(
         r"\b(pesquise|pesquisa|procure|buscar|busque|consulta|consulte|no\s+google|na\s+web|na\s+internet|wikipedia|wiki|cotacao|cota[cç]ao|pre[cç]o|grafico|gr[aá]fico|chart)\b",
@@ -536,6 +544,10 @@ def route_llm(
     asked_dev = _asked_for_dev_exec(norm)
     asked_web = _asked_for_web_or_data(norm)
     asked_os = _asked_for_os_action(norm)
+    asked_jgrasp_task = bool(
+        re.search(r"\bjgrasp\b", norm)
+        and re.search(r"\b(crie|criar|escreva|escrever|gere|gerar|fa[cç]a|faca|implemente|implementar)\b", norm)
+    )
 
     def _has_forbidden_tools(p: Plan) -> bool:
         for c in p.tool_calls:
@@ -546,6 +558,11 @@ def route_llm(
 
             # OS side-effects (abrir/fechar apps/URLs) só quando solicitado.
             if name in {"os.open_url", "os.open_app", "os.open_explorer", "os.close_app"} and not asked_os:
+                # Exceção segura: quando o usuário pediu uma tarefa no jGRASP, abrir o jGRASP é implícito.
+                if name == "os.open_app" and asked_jgrasp_task:
+                    app = str((c.args or {}).get("app") or "").strip().lower()
+                    if app in {"jgrasp", "j-grasp"}:
+                        continue
                 return True
 
             if name.startswith("dev.") and not asked_dev:
@@ -3467,10 +3484,35 @@ def _route_with_llm_messages(
         return None
 
     def _build_registered_tools_catalog(r: ToolRegistry) -> str:
-        # Catálogo compacto (name-only) para não explodir o prompt.
-        # As ferramentas mais importantes têm args explicitados em SCHEMAS.
+        return _build_registered_tools_catalog_subset(r, only_names=None)
+
+    def _build_registered_tools_catalog_subset(r: ToolRegistry, *, only_names: list[str] | None) -> str:
+        """Catálogo name-only.
+
+        Quando `only_names` é fornecido, lista apenas esse subconjunto (na ordem dada).
+        Isso reduz tokens e melhora latência/qualidade do roteamento.
+        """
+
+        if only_names:
+            present: list[str] = []
+            for n in only_names:
+                name = (n or "").strip()
+                if not name:
+                    continue
+                try:
+                    r.get(name)
+                except Exception:
+                    continue
+                present.append(name)
+            lines = [f"- {n}" for n in present]
+            lines.append(
+                "... (catálogo em modo shortlist; se precisar de outras tools, use core.list_tools)"
+            )
+            return "\n".join(lines)
+
+        # Fallback: lista compacta com limite.
         names = sorted({(s.name or "").strip() for s in r.list() if (s.name or "").strip()})
-        max_tools = 180
+        max_tools = _env_int("OMNI_ROUTER_TOOLS_CATALOG_LIMIT", 180)
         shown = names[:max_tools]
         rest = max(0, len(names) - len(shown))
 
@@ -3479,7 +3521,7 @@ def _route_with_llm_messages(
             lines.append(f"... (+{rest} tools não listadas por limite de prompt; se precisar, use core.list_tools)")
         return "\n".join(lines)
 
-    def _build_schema_hints(r: ToolRegistry) -> str:
+    def _build_schema_hints(r: ToolRegistry, *, only_names: set[str] | None = None) -> str:
         # Hints curtos para tools comuns/complexas.
         # Só incluímos as que existem no runtime para evitar planos inválidos.
         hints: dict[str, str] = {
@@ -3563,12 +3605,105 @@ def _route_with_llm_messages(
 
         present: list[str] = []
         for name in sorted(hints.keys()):
+            if only_names is not None and name not in only_names:
+                continue
             try:
                 r.get(name)
             except Exception:
                 continue
             present.append(hints[name])
         return "\n".join(present)
+
+    def _select_tool_names_for_prompt(r: ToolRegistry, *, user_text: str) -> list[str]:
+        """Seleciona um subconjunto (Top-K) de tools para o prompt.
+
+        Motivo: injetar todas as tools todo turno aumenta tokens/latência e piora a qualidade.
+        Estratégia: scoring lexical (sem dependências extras) + conjunto base.
+        """
+
+        if (os.getenv("OMNI_ROUTER_TOOL_SHORTLIST", "true").strip().lower() == "false"):
+            return []
+
+        q_norm = _normalize(user_text)
+        q_tokens = set(re.findall(r"[a-z0-9]+", q_norm))
+
+        base: list[str] = [
+            "core.show_settings",
+            "core.list_tools",
+            "core.help",
+            "core.doctor",
+            "memory.search",
+            "memory.remember",
+            "fs.list_dir",
+            "fs.read_text",
+            "os.open_url",
+            "os.open_explorer",
+            "os.open_app",
+            "web.search",
+            "web.get_page_text",
+            "finance.crypto_price",
+            "finance.crypto_market_chart",
+            "knowledge.wikipedia_summary",
+            "vscode.open",
+            "vscode.open_file",
+        ]
+
+        # Boost explícitos por domínios.
+        if "discord" in q_norm:
+            base += ["discord.send_message", "status.discord"]
+        if "vscode" in q_norm or "vs" in q_tokens or "code" in q_tokens:
+            base += ["vscode.tasks_read", "vscode.tasks_update", "vscode.settings_read", "vscode.settings_update"]
+
+        scored: list[tuple[int, str]] = []
+        for spec in r.list():
+            name = (getattr(spec, "name", None) or "").strip()
+            if not name:
+                continue
+            desc = str(getattr(spec, "description", None) or "")
+
+            blob = _normalize(name + " " + desc)
+            score = 0
+
+            # Match por namespace (ex.: "finance" -> finance.*)
+            ns = name.split(".", 1)[0] if "." in name else name
+            if ns and ns in q_tokens:
+                score += 6
+
+            # Match por tokens do usuário (barato e eficaz)
+            for tok in q_tokens:
+                if tok and tok in blob:
+                    score += 1
+
+            # Match literal do nome da tool
+            if name.lower() in q_norm:
+                score += 12
+
+            if score > 0:
+                scored.append((score, name))
+
+        scored.sort(key=lambda x: (-x[0], x[1]))
+
+        k = _env_int("OMNI_ROUTER_TOOL_SHORTLIST_K", 45)
+        max_total = _env_int("OMNI_ROUTER_TOOL_SHORTLIST_MAX", 80)
+
+        selected: list[str] = []
+        seen: set[str] = set()
+
+        for n in base:
+            nn = (n or "").strip()
+            if not nn or nn in seen:
+                continue
+            seen.add(nn)
+            selected.append(nn)
+
+        for _, n in scored[:k]:
+            nn = (n or "").strip()
+            if not nn or nn in seen:
+                continue
+            seen.add(nn)
+            selected.append(nn)
+
+        return selected[:max_total]
 
     static_tools_block = (
         "- core.show_settings -> {}\n"
@@ -3636,8 +3771,21 @@ def _route_with_llm_messages(
     tools_block = ""
     schemas_block = ""
     if registry is not None:
-        tools_block = _build_registered_tools_catalog(registry)
-        schemas_block = _build_schema_hints(registry)
+        # Escolhe um subset de tools para reduzir tokens/latência.
+        last_user_text = ""
+        for m in reversed(messages or []):
+            role = str((m or {}).get("role") or "").strip().lower()
+            if role == "user":
+                last_user_text = str((m or {}).get("content") or "")
+                break
+
+        subset = _select_tool_names_for_prompt(registry, user_text=last_user_text)
+        if subset:
+            tools_block = _build_registered_tools_catalog_subset(registry, only_names=subset)
+            schemas_block = _build_schema_hints(registry, only_names=set(subset))
+        else:
+            tools_block = _build_registered_tools_catalog(registry)
+            schemas_block = _build_schema_hints(registry)
 
     system = (
         "Você é um roteador de ferramentas para um agente autônomo. "

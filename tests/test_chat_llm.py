@@ -10,7 +10,7 @@ from omniscia.core.config import Settings
 
 def test_chat_reply_uses_litellm_completion(monkeypatch):
     # Fake litellm module
-    def fake_completion(*, model, messages, temperature):  # noqa: ANN001
+    def fake_completion(*, model, messages, temperature, **_kwargs):  # noqa: ANN001
         assert model == "groq/llama"
         assert messages[-1]["role"] == "user"
         return {"choices": [{"message": {"content": "resposta ok"}}]}
@@ -43,7 +43,7 @@ def test_chat_reply_can_attach_image_when_vlm_enabled(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
 
     # Fake litellm module
-    def fake_completion(*, model, messages, temperature):  # noqa: ANN001
+    def fake_completion(*, model, messages, temperature, **_kwargs):  # noqa: ANN001
         assert model == "groq/llama"
         assert messages[-1]["role"] == "user"
         content = messages[-1]["content"]
