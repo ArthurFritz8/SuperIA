@@ -373,6 +373,22 @@ def run_brain_loop(settings: Settings) -> None:
                 )
                 plan = revised
 
+        # Robustez: se o router devolver um plano "vazio" (sem tools e sem resposta),
+        # tratamos como conversa. Sem isso, o loop cai no fallback genérico "Feito.".
+        if (
+            plan is not None
+            and (plan.intent or "").strip() not in {"chat", "exit"}
+            and (not bool(plan.tool_calls))
+            and (not str(plan.final_response or "").strip())
+        ):
+            plan = Plan(
+                intent="chat",
+                user_message=user_message.strip(),
+                tool_calls=[],
+                risk=RiskLevel.LOW,
+                final_response="",
+            )
+
         # Para mensagens de orientação/conversa, responda diretamente com LLM (sem tools).
         # Isso deixa o assistente muito mais "Jarvis" no dia-a-dia.
         if plan.intent == "chat":
