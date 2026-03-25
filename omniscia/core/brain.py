@@ -45,6 +45,10 @@ from omniscia.core.tool_runner import ToolRunner
 from omniscia.core.tool_schemas import (
     DevExecArgs,
     EduPdfWordAutofillArgs,
+    FinanceDefiLlamaProtocolArgs,
+    FinanceDefiLlamaProtocolsArgs,
+    FinanceDexScreenerChainDiscoveryArgs,
+    FinanceDexScreenerSearchArgs,
     FsCopyArgs,
     FsListDirArgs,
     FsMoveArgs,
@@ -107,6 +111,10 @@ def build_brain_context(settings: Settings, *, console: Console) -> BrainContext
     runner.register_schema("game.calibrate_runner_from_mouse", GameCalibrateRunnerArgs)
     runner.register_schema("game.trex_autoplay", GameTrexAutoplayArgs)
     runner.register_schema("edu.pdf_word_autofill", EduPdfWordAutofillArgs)
+    runner.register_schema("finance.dexscreener_search", FinanceDexScreenerSearchArgs)
+    runner.register_schema("finance.dexscreener_chain_discovery", FinanceDexScreenerChainDiscoveryArgs)
+    runner.register_schema("finance.defillama_protocols", FinanceDefiLlamaProtocolsArgs)
+    runner.register_schema("finance.defillama_protocol", FinanceDefiLlamaProtocolArgs)
     # Settings é frozen; anexamos via setattr controlado para evitar mudar API pública.
     object.__setattr__(settings, "_tool_runner", runner)
     profile_store = UserProfileStore()

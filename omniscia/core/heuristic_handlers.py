@@ -1779,6 +1779,69 @@ class CryptoKnowledgeHandlers:
 
 
 @dataclass(frozen=True)
+class CryptoIntelHandlers:
+    def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
+        msg = user_message.strip()
+
+        # Airdrops / farming / campanhas
+        if re.search(r"\b(airdrop|airdrops|farming|retroativo|retroactive)\b", norm, flags=re.IGNORECASE):
+            q = msg
+            # Coleta: DefiLlama (protocolos) + web.search/research como suporte.
+            # Mantemos as tools separadas (sem tool que executa multi-call) para o modelo poder iterar.
+            return Plan(
+                intent="crypto.airdrops_intel",
+                user_message=msg,
+                tool_calls=[
+                    ToolCall(tool_name="finance.defillama_protocols", args={"limit": 25}),
+                    ToolCall(tool_name="web.search", args={"query": f"{q} site:defillama.com airdrop", "max_results": 6}),
+                    ToolCall(tool_name="web.search", args={"query": f"{q} airdrop eligibility guide", "max_results": 6}),
+                ],
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou coletar sinais de airdrops/campanhas e consolidar fontes.",
+            )
+
+        # Meme coins / pré-lançamentos / stealth
+        if re.search(r"\b(memecoin|meme\s*coin|memecoins|stealth\s*launch|pre\s*lan[cç]amento|pr[eé]\-?lan[cç]amento|lan[cç]ando\s*hoje|novo\s*token)\b", norm, flags=re.IGNORECASE):
+            # Preferimos discovery via DexScreener (DEX) por ser onde isso nasce.
+            chain = None
+            if re.search(r"\bsolana\b|\bsol\b", norm):
+                chain = "solana"
+            elif re.search(r"\bbase\b", norm):
+                chain = "base"
+            elif re.search(r"\beth\b|\bethereum\b", norm):
+                chain = "ethereum"
+
+            tool_calls: list[ToolCall] = []
+            if chain:
+                tool_calls.append(
+                    ToolCall(
+                        tool_name="finance.dexscreener_chain_discovery",
+                        args={"chain": chain, "limit": 15},
+                    )
+                )
+            else:
+                # Discovery “geral”: faz uma busca por termos típicos.
+                tool_calls.append(
+                    ToolCall(
+                        tool_name="finance.dexscreener_search",
+                        args={"query": "memecoin", "limit": 15},
+                    )
+                )
+            tool_calls.append(
+                ToolCall(tool_name="web.search", args={"query": f"{msg} warning scam", "max_results": 6})
+            )
+            return Plan(
+                intent="crypto.memecoin_intel",
+                user_message=msg,
+                tool_calls=tool_calls,
+                risk=RiskLevel.MEDIUM,
+                final_response="Ok — vou puxar sinais de DEX + checagens web e consolidar uma lista com riscos.",
+            )
+
+        return None
+
+
+@dataclass(frozen=True)
 class FilesystemHandlers:
     def try_handle(self, *, user_message: str, norm: str, context_messages: list[dict[str, str]] | None) -> Plan | None:
         msg = user_message.strip()
@@ -2513,6 +2576,7 @@ _HANDLERS: tuple[HeuristicHandler, ...] = (
     LanguageAndQaHandlers(),
     FunAndMediaHandlers(),
     CryptoKnowledgeHandlers(),
+    CryptoIntelHandlers(),
     FilesystemHandlers(),
     VSCodeConfigHandlers(),
     ScreenVisionHandlers(),

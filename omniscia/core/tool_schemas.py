@@ -89,3 +89,21 @@ class EduPdfWordAutofillArgs(ToolArgsBase):
     max_scrolls: int = Field(default=22, ge=0, le=200)
     duration_s: float = Field(default=45.0, ge=1.0, le=600.0)
     settle_ms: int = Field(default=650, ge=0, le=5000)
+
+
+class FinanceDexScreenerSearchArgs(ToolArgsBase):
+    query: str = Field(min_length=1)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class FinanceDexScreenerChainDiscoveryArgs(ToolArgsBase):
+    chain: str = Field(min_length=2)
+    limit: int = Field(default=10, ge=1, le=25)
+
+
+class FinanceDefiLlamaProtocolsArgs(ToolArgsBase):
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class FinanceDefiLlamaProtocolArgs(ToolArgsBase):
+    slug: str = Field(min_length=1)

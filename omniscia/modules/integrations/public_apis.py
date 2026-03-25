@@ -396,6 +396,50 @@ def register_public_api_tools(registry: ToolRegistry) -> None:
 
     registry.register(
         ToolSpec(
+            name="finance.dexscreener_search",
+            description=(
+                "Busca tokens/pairs no DexScreener. Args: query (ex: symbol, nome, endereço), limit? (default 10)"
+            ),
+            risk="MEDIUM",
+            fn=_dexscreener_search,
+            async_fn=_dexscreener_search_async,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="finance.dexscreener_chain_discovery",
+            description=(
+                "Descoberta best-effort por chain via DexScreener (não é lista oficial de trending). Args: chain (ex: solana|ethereum|base), limit? (default 10)"
+            ),
+            risk="MEDIUM",
+            fn=_dexscreener_chain_discovery,
+            async_fn=_dexscreener_chain_discovery_async,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="finance.defillama_protocols",
+            description="Lista protocolos via DefiLlama (TVL). Args: limit? (default 20)",
+            risk="MEDIUM",
+            fn=_defillama_protocols,
+            async_fn=_defillama_protocols_async,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
+            name="finance.defillama_protocol",
+            description="Detalhes de um protocolo DefiLlama. Args: slug (ex: aave)",
+            risk="MEDIUM",
+            fn=_defillama_protocol,
+            async_fn=_defillama_protocol_async,
+        )
+    )
+
+    registry.register(
+        ToolSpec(
             name="papers.arxiv_search",
             description="Busca papers no arXiv (ATOM). Args: query, max_results? (default 5)",
             risk="MEDIUM",
@@ -2200,6 +2244,285 @@ def _crypto_market_chart(args: dict[str, Any]) -> ToolResult:
     # Inclui JSON compactado no final (útil para debug sem depender do LLM).
     text += "\n\nJSON:\n" + json.dumps(out, ensure_ascii=False)
     return ToolResult(status="ok", output=text)
+
+
+def _dexscreener_search(args: dict[str, Any]) -> ToolResult:
+    q = str(args.get("query") or "").strip()
+    if not q:
+        return ToolResult(status="error", error="query é obrigatório")
+    try:
+        limit = int(args.get("limit") or 10)
+    except Exception:  # noqa: BLE001
+        limit = 10
+    limit = max(1, min(limit, 25))
+
+    url = "https://api.dexscreener.com/latest/dex/search"
+    data, err = _http_json(method="GET", url=url, params={"q": q}, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    pairs = list((data or {}).get("pairs") or [])
+
+    out: list[dict[str, Any]] = []
+    for p in pairs[:limit]:
+        if not isinstance(p, dict):
+            continue
+        out.append(
+            {
+                "chainId": p.get("chainId"),
+                "dexId": p.get("dexId"),
+                "pairAddress": p.get("pairAddress"),
+                "baseToken": p.get("baseToken"),
+                "quoteToken": p.get("quoteToken"),
+                "priceUsd": p.get("priceUsd"),
+                "fdv": p.get("fdv"),
+                "liquidity": p.get("liquidity"),
+                "volume": p.get("volume"),
+                "txns": p.get("txns"),
+                "url": p.get("url"),
+            }
+        )
+    return ToolResult(status="ok", output=json.dumps({"query": q, "results": out}, ensure_ascii=False))
+
+
+async def _dexscreener_search_async(args: dict[str, Any]) -> ToolResult:
+    q = str(args.get("query") or "").strip()
+    if not q:
+        return ToolResult(status="error", error="query é obrigatório")
+    try:
+        limit = int(args.get("limit") or 10)
+    except Exception:  # noqa: BLE001
+        limit = 10
+    limit = max(1, min(limit, 25))
+
+    url = "https://api.dexscreener.com/latest/dex/search"
+    data, err = await _http_json_async(method="GET", url=url, params={"q": q}, timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    pairs = list((data or {}).get("pairs") or [])
+
+    out: list[dict[str, Any]] = []
+    for p in pairs[:limit]:
+        if not isinstance(p, dict):
+            continue
+        out.append(
+            {
+                "chainId": p.get("chainId"),
+                "dexId": p.get("dexId"),
+                "pairAddress": p.get("pairAddress"),
+                "baseToken": p.get("baseToken"),
+                "quoteToken": p.get("quoteToken"),
+                "priceUsd": p.get("priceUsd"),
+                "fdv": p.get("fdv"),
+                "liquidity": p.get("liquidity"),
+                "volume": p.get("volume"),
+                "txns": p.get("txns"),
+                "url": p.get("url"),
+            }
+        )
+    return ToolResult(status="ok", output=json.dumps({"query": q, "results": out}, ensure_ascii=False))
+
+
+def _dexscreener_chain_discovery(args: dict[str, Any]) -> ToolResult:
+    chain = str(args.get("chain") or "").strip().lower()
+    if not chain:
+        return ToolResult(status="error", error="chain é obrigatório (ex: solana|ethereum|base)")
+    try:
+        limit = int(args.get("limit") or 10)
+    except Exception:  # noqa: BLE001
+        limit = 10
+    limit = max(1, min(limit, 25))
+
+    # Não existe um endpoint universal e estável de "trending"; fazemos descoberta via search e filtramos por chain.
+    data, err = _http_json(
+        method="GET",
+        url="https://api.dexscreener.com/latest/dex/search",
+        params={"q": chain},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    pairs = list((data or {}).get("pairs") or [])
+
+    out: list[dict[str, Any]] = []
+    for p in pairs:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("chainId") or "").lower() != chain:
+            continue
+        out.append(
+            {
+                "chainId": p.get("chainId"),
+                "dexId": p.get("dexId"),
+                "pairAddress": p.get("pairAddress"),
+                "baseToken": p.get("baseToken"),
+                "quoteToken": p.get("quoteToken"),
+                "priceUsd": p.get("priceUsd"),
+                "fdv": p.get("fdv"),
+                "liquidity": p.get("liquidity"),
+                "volume": p.get("volume"),
+                "txns": p.get("txns"),
+                "url": p.get("url"),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return ToolResult(status="ok", output=json.dumps({"chain": chain, "results": out}, ensure_ascii=False))
+
+
+async def _dexscreener_chain_discovery_async(args: dict[str, Any]) -> ToolResult:
+    chain = str(args.get("chain") or "").strip().lower()
+    if not chain:
+        return ToolResult(status="error", error="chain é obrigatório (ex: solana|ethereum|base)")
+    try:
+        limit = int(args.get("limit") or 10)
+    except Exception:  # noqa: BLE001
+        limit = 10
+    limit = max(1, min(limit, 25))
+
+    data, err = await _http_json_async(
+        method="GET",
+        url="https://api.dexscreener.com/latest/dex/search",
+        params={"q": chain},
+        timeout_s=12.0,
+    )
+    if err:
+        return ToolResult(status="error", error=err)
+    pairs = list((data or {}).get("pairs") or [])
+
+    out: list[dict[str, Any]] = []
+    for p in pairs:
+        if not isinstance(p, dict):
+            continue
+        if str(p.get("chainId") or "").lower() != chain:
+            continue
+        out.append(
+            {
+                "chainId": p.get("chainId"),
+                "dexId": p.get("dexId"),
+                "pairAddress": p.get("pairAddress"),
+                "baseToken": p.get("baseToken"),
+                "quoteToken": p.get("quoteToken"),
+                "priceUsd": p.get("priceUsd"),
+                "fdv": p.get("fdv"),
+                "liquidity": p.get("liquidity"),
+                "volume": p.get("volume"),
+                "txns": p.get("txns"),
+                "url": p.get("url"),
+            }
+        )
+        if len(out) >= limit:
+            break
+    return ToolResult(status="ok", output=json.dumps({"chain": chain, "results": out}, ensure_ascii=False))
+
+
+def _defillama_protocols(args: dict[str, Any]) -> ToolResult:
+    try:
+        limit = int(args.get("limit") or 20)
+    except Exception:  # noqa: BLE001
+        limit = 20
+    limit = max(1, min(limit, 50))
+
+    data, err = _http_json(method="GET", url="https://api.llama.fi/protocols", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    protocols = [p for p in (data or []) if isinstance(p, dict)]
+    protocols.sort(key=lambda p: float(p.get("tvl") or 0.0), reverse=True)
+
+    out: list[dict[str, Any]] = []
+    for p in protocols[:limit]:
+        out.append(
+            {
+                "name": p.get("name"),
+                "slug": p.get("slug"),
+                "category": p.get("category"),
+                "tvl": p.get("tvl"),
+                "chains": p.get("chains"),
+                "url": p.get("url"),
+                "twitter": p.get("twitter"),
+                "github": p.get("github"),
+            }
+        )
+    return ToolResult(status="ok", output=json.dumps({"results": out}, ensure_ascii=False))
+
+
+async def _defillama_protocols_async(args: dict[str, Any]) -> ToolResult:
+    try:
+        limit = int(args.get("limit") or 20)
+    except Exception:  # noqa: BLE001
+        limit = 20
+    limit = max(1, min(limit, 50))
+
+    data, err = await _http_json_async(method="GET", url="https://api.llama.fi/protocols", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    protocols = [p for p in (data or []) if isinstance(p, dict)]
+    protocols.sort(key=lambda p: float(p.get("tvl") or 0.0), reverse=True)
+
+    out: list[dict[str, Any]] = []
+    for p in protocols[:limit]:
+        out.append(
+            {
+                "name": p.get("name"),
+                "slug": p.get("slug"),
+                "category": p.get("category"),
+                "tvl": p.get("tvl"),
+                "chains": p.get("chains"),
+                "url": p.get("url"),
+                "twitter": p.get("twitter"),
+                "github": p.get("github"),
+            }
+        )
+    return ToolResult(status="ok", output=json.dumps({"results": out}, ensure_ascii=False))
+
+
+def _defillama_protocol(args: dict[str, Any]) -> ToolResult:
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return ToolResult(status="error", error="slug é obrigatório")
+    data, err = _http_json(method="GET", url=f"https://api.llama.fi/protocol/{slug}", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if isinstance(data, dict):
+        out: dict[str, Any] = {
+            "name": data.get("name"),
+            "slug": data.get("slug"),
+            "category": data.get("category"),
+            "chains": data.get("chains"),
+            "tvl": data.get("tvl"),
+            "description": data.get("description"),
+            "url": data.get("url"),
+            "twitter": data.get("twitter"),
+            "github": data.get("github"),
+            "audits": data.get("audits"),
+        }
+    else:
+        out = {"raw": data}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
+
+
+async def _defillama_protocol_async(args: dict[str, Any]) -> ToolResult:
+    slug = str(args.get("slug") or "").strip()
+    if not slug:
+        return ToolResult(status="error", error="slug é obrigatório")
+    data, err = await _http_json_async(method="GET", url=f"https://api.llama.fi/protocol/{slug}", timeout_s=12.0)
+    if err:
+        return ToolResult(status="error", error=err)
+    if isinstance(data, dict):
+        out: dict[str, Any] = {
+            "name": data.get("name"),
+            "slug": data.get("slug"),
+            "category": data.get("category"),
+            "chains": data.get("chains"),
+            "tvl": data.get("tvl"),
+            "description": data.get("description"),
+            "url": data.get("url"),
+            "twitter": data.get("twitter"),
+            "github": data.get("github"),
+            "audits": data.get("audits"),
+        }
+    else:
+        out = {"raw": data}
+    return ToolResult(status="ok", output=json.dumps(out, ensure_ascii=False))
 
 
 def _arxiv_search(args: dict[str, Any]) -> ToolResult:
